@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 
 export const THEME_PRESETS = [
@@ -6,8 +6,12 @@ export const THEME_PRESETS = [
   { id: "dark", label: "Dark", background: "#1b1c1c", textColor: "#e8e8e8", surface: "#262626" },
   { id: "sepia", label: "Sepia", background: "#f4ecd8", textColor: "#3b352b", surface: "#fdfbf6" },
   { id: "night", label: "Night", background: "#0f172a", textColor: "#cbd5e1", surface: "#1e293b" },
+  { id: "paper", label: "Old Paper", background: "#efe5ce", textColor: "#433a2a", surface: "#f8f0dc" },
+  { id: "modern", label: "Modern", background: "#fafafa", textColor: "#141414", surface: "#ffffff" },
   { id: "mint", label: "Mint", background: "#eaf4eb", textColor: "#1b2a1c", surface: "#ffffff" },
   { id: "rose", label: "Rose", background: "#faebed", textColor: "#2c1b1e", surface: "#ffffff" },
+  { id: "ocean", label: "Ocean", background: "#e6eff7", textColor: "#1b2a3a", surface: "#f4f8fc" },
+  { id: "forest", label: "Forest", background: "#e4efe3", textColor: "#1c2a20", surface: "#f2f8f1" },
 ];
 
 export const FONT_OPTIONS = [
@@ -20,7 +24,14 @@ export const FONT_OPTIONS = [
   { id: "roboto", label: "Roboto", stack: "'Roboto', system-ui, sans-serif" },
   { id: "opensans", label: "Open Sans", stack: "'Open Sans', system-ui, sans-serif" },
   { id: "atkinson", label: "Atkinson", stack: "'Atkinson Hyperlegible', system-ui, sans-serif" },
+  { id: "playfair", label: "Playfair", stack: "'Playfair Display', Georgia, serif" },
+  { id: "ptserif", label: "PT Serif", stack: "'PT Serif', Georgia, serif" },
+  { id: "crimson", label: "Crimson", stack: "'Crimson Text', Georgia, serif" },
+  { id: "lato", label: "Lato", stack: "'Lato', system-ui, sans-serif" },
+  { id: "poppins", label: "Poppins", stack: "'Poppins', system-ui, sans-serif" },
+  { id: "nunito", label: "Nunito", stack: "'Nunito', system-ui, sans-serif" },
 ];
+
 
 const MARGIN_OPTIONS = [
   { id: "small", label: "Small", inset: 48 },
@@ -29,13 +40,22 @@ const MARGIN_OPTIONS = [
 ];
 
 export default function ThemeControls({ theme, setTheme, reflowAvailable, onClose }) {
-  const [customHex, setCustomHex] = useState("");
   const [dirty, setDirty] = useState(false);
+  const [fontOpen, setFontOpen] = useState(false);
+  const fontMenuRef = useRef(null);
 
   const applyTheme = (patch) => {
     setTheme({ ...theme, ...patch });
     setDirty(true);
   };
+
+  useEffect(() => {
+    const onDoc = (e) => {
+      if (fontMenuRef.current && !fontMenuRef.current.contains(e.target)) setFontOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, []);
 
   useEffect(() => {
     if (!dirty) return;
@@ -45,7 +65,6 @@ export default function ThemeControls({ theme, setTheme, reflowAvailable, onClos
           method: "PUT",
           body: {
             theme: theme.themeId,
-            custom_background: theme.customBackground || null,
             font_family: theme.fontId,
             font_size: theme.fontSize,
             line_spacing: theme.lineSpacing,
@@ -61,17 +80,11 @@ export default function ThemeControls({ theme, setTheme, reflowAvailable, onClos
     return () => clearTimeout(timer);
   }, [theme, dirty]);
 
-  const applyCustomHex = () => {
-    const hex = customHex.trim();
-    if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return;
-    applyTheme({ background: hex, textColor: "#1b1c1c", themeId: "custom", customBackground: hex });
-  };
-
   const resetDefaults = async () => {
     const defaults = {
       themeId: "light",
-      customBackground: null,
       background: THEME_PRESETS[0].background,
+      surface: THEME_PRESETS[0].surface,
       textColor: THEME_PRESETS[0].textColor,
       fontId: "serif",
       font: FONT_OPTIONS[0].stack,
@@ -89,7 +102,6 @@ export default function ThemeControls({ theme, setTheme, reflowAvailable, onClos
         method: "PUT",
         body: {
           theme: "light",
-          custom_background: null,
           font_family: "serif",
           font_size: 20,
           line_spacing: 1.6,
@@ -120,6 +132,9 @@ export default function ThemeControls({ theme, setTheme, reflowAvailable, onClos
         height: "100%",
         background: "var(--surface-container-lowest)",
         borderLeft: "1px solid var(--outline-variant)",
+        borderTopLeftRadius: 16,
+        borderBottomLeftRadius: 16,
+        overflow: "hidden",
         display: "flex",
         flexDirection: "column",
         flexShrink: 0,
@@ -149,11 +164,11 @@ export default function ThemeControls({ theme, setTheme, reflowAvailable, onClos
           <div style={rowLabel}>Theme</div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
             {THEME_PRESETS.map((preset) => {
-              const active = theme.background === preset.background && !theme.customBackground;
+              const active = theme.background === preset.background;
               return (
                 <button
                   key={preset.id}
-                  onClick={() => applyTheme({ themeId: preset.id, background: preset.background, textColor: preset.textColor, customBackground: null })}
+                  onClick={() => applyTheme({ themeId: preset.id, background: preset.background, surface: preset.surface, textColor: preset.textColor })}
                   style={{
                     display: "flex",
                     flexDirection: "column",
@@ -185,17 +200,6 @@ export default function ThemeControls({ theme, setTheme, reflowAvailable, onClos
               );
             })}
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, paddingTop: 12, borderTop: "1px solid var(--surface-variant)" }}>
-            <span className="icon text-muted" style={{ fontSize: 18 }}>palette</span>
-            <input
-              type="text"
-              value={customHex}
-              onChange={(e) => setCustomHex(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && applyCustomHex()}
-              placeholder="Custom hex (#FFFFFF)"
-              style={{ flex: 1, border: "none", outline: "none", background: "transparent", fontSize: 14, color: "var(--on-surface)" }}
-            />
-          </div>
         </section>
 
         {/* Typography */}
@@ -206,26 +210,89 @@ export default function ThemeControls({ theme, setTheme, reflowAvailable, onClos
             <label style={{ fontSize: 12, color: "var(--on-surface-variant)", display: "block", marginBottom: 8 }}>
               Font Family
             </label>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-              {FONT_OPTIONS.map((f) => (
-                <button
-                  key={f.id}
-                  onClick={() => applyTheme({ fontId: f.id, font: f.stack })}
+            <div ref={fontMenuRef} style={{ position: "relative" }}>
+              <button
+                onClick={() => setFontOpen((o) => !o)}
+                style={{
+                  width: "100%",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 10,
+                  padding: "11px 14px",
+                  borderRadius: 10,
+                  border: "1px solid var(--outline-variant)",
+                  background: "var(--surface)",
+                  cursor: "pointer",
+                  boxShadow: fontOpen ? "0 0 0 3px rgba(21,66,18,0.18)" : "none",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+                  <span className="icon text-muted" style={{ fontSize: 17 }}>font_download</span>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontFamily: theme.font, fontSize: 14, color: "var(--on-surface)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {FONT_OPTIONS.find((f) => f.id === theme.fontId)?.label || "Default"}
+                    </div>
+                    <div style={{ fontFamily: theme.font, fontSize: 10, color: "var(--on-surface-variant)", opacity: 0.7, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      The quick brown fox jumps over the lazy dog
+                    </div>
+                  </div>
+                </div>
+                <span className="icon text-muted" style={{ fontSize: 18, flexShrink: 0 }}>{fontOpen ? "expand_less" : "expand_more"}</span>
+              </button>
+              {fontOpen && (
+                <div
                   style={{
-                    flex: "1 1 auto",
-                    minWidth: 78,
-                    padding: "8px 10px",
-                    borderRadius: 6,
-                    border: theme.fontId === f.id ? "2px solid var(--primary)" : "1px solid var(--outline-variant)",
-                    background: theme.fontId === f.id ? "rgba(21,66,18,0.06)" : "transparent",
-                    color: theme.fontId === f.id ? "var(--primary)" : "var(--on-surface-variant)",
-                    fontWeight: theme.fontId === f.id ? 600 : 500,
-                    fontSize: 12,
+                    position: "absolute",
+                    top: "calc(100% + 6px)",
+                    left: 0,
+                    right: 0,
+                    zIndex: 50,
+                    maxHeight: 264,
+                    overflowY: "auto",
+                    padding: 6,
+                    background: "var(--surface-container-lowest)",
+                    border: "1px solid var(--outline-variant)",
+                    borderRadius: 12,
+                    boxShadow: "0 18px 44px rgba(0,0,0,0.22)",
                   }}
                 >
-                  {f.label}
-                </button>
-              ))}
+                  {FONT_OPTIONS.map((f) => {
+                    const active = theme.fontId === f.id;
+                    return (
+                      <button
+                        key={f.id}
+                        onClick={() => {
+                          applyTheme({ fontId: f.id, font: f.stack });
+                          setFontOpen(false);
+                        }}
+                        style={{
+                          width: "100%",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: 10,
+                          padding: "9px 12px",
+                          borderRadius: 8,
+                          border: "none",
+                          background: active ? "rgba(21,66,18,0.08)" : "transparent",
+                          color: active ? "var(--primary)" : "var(--on-surface)",
+                          cursor: "pointer",
+                          textAlign: "left",
+                        }}
+                      >
+                        <div style={{ fontFamily: f.stack, fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          {f.label}
+                        </div>
+                        <div style={{ fontFamily: f.stack, fontSize: 10, color: "var(--on-surface-variant)", opacity: 0.7, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          Aa The quick brown fox
+                        </div>
+                        {active && <span className="icon" style={{ fontSize: 15, flexShrink: 0 }}>check</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
 

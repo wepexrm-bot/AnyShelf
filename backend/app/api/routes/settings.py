@@ -8,8 +8,8 @@ from app.db.database import get_db
 
 router = APIRouter()
 
-VALID_THEMES = {"light", "dark", "sepia", "night", "mint", "rose"}
-VALID_FONTS = {"serif", "sans", "dyslexic", "lora", "merriweather", "garamond", "roboto", "opensans", "atkinson"}
+VALID_THEMES = {"light", "dark", "sepia", "night", "mint", "rose", "paper", "modern", "ocean", "forest"}
+VALID_FONTS = {"serif", "sans", "dyslexic", "lora", "merriweather", "garamond", "roboto", "opensans", "atkinson", "playfair", "lato", "poppins", "nunito", "ptserif", "crimson"}
 VALID_MARGINS = {"small", "medium", "large"}
 VALID_MODES = {"scroll", "paginate"}
 VALID_LAYOUTS = {"spread", "single"}
@@ -17,7 +17,6 @@ VALID_LAYOUTS = {"spread", "single"}
 
 class SettingsUpdate(BaseModel):
     theme: str | None = None
-    custom_background: str | None = Field(default=None, max_length=7)
     font_family: str | None = None
     font_size: int | None = Field(default=None, ge=14, le=32)
     line_spacing: float | None = Field(default=None, ge=1.0, le=2.5)
@@ -39,7 +38,6 @@ def _get_or_create_settings(db: Session, user_id: str) -> UserSettings:
 def _settings_to_dict(s: UserSettings) -> dict:
     return {
         "theme": s.theme,
-        "custom_background": s.custom_background,
         "font_family": s.font_family,
         "font_size": s.font_size,
         "line_spacing": s.line_spacing,

@@ -6,8 +6,8 @@ import { api } from "../api";
 
 const DEFAULT_THEME = {
   themeId: "light",
-  customBackground: null,
   background: "#fcf9f8",
+  surface: "#ffffff",
   textColor: "#1b1c1c",
   fontId: "serif",
   font: FONT_OPTIONS[0].stack,
@@ -19,14 +19,11 @@ const DEFAULT_THEME = {
   pageLayout: "spread",
 };
 
-function isDarkColor(hex) {
+function hexToRgba(hex, alpha) {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
-  if (!m) return false;
+  if (!m) return `rgba(128,128,128,${alpha})`;
   const n = parseInt(m[1], 16);
-  const r = (n >> 16) & 255;
-  const g = (n >> 8) & 255;
-  const b = n & 255;
-  return 0.299 * r + 0.587 * g + 0.114 * b < 128;
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
 }
 
 // The reader paints its own background/text from `theme`, so the app-wide
@@ -37,7 +34,6 @@ function isDarkColor(hex) {
 function readerThemeVars(theme) {
   let dark;
   if (theme.themeId === "dark" || theme.themeId === "night") dark = true;
-  else if (theme.themeId === "custom") dark = isDarkColor(theme.customBackground || theme.background);
   else dark = false;
 
   if (dark) {
@@ -159,7 +155,6 @@ export default function Reader() {
         method: "PUT",
         body: {
           theme: theme.themeId,
-          custom_background: theme.customBackground || null,
           font_family: theme.fontId,
           font_size: theme.fontSize,
           line_spacing: theme.lineSpacing,
@@ -201,8 +196,8 @@ export default function Reader() {
         const font = FONT_OPTIONS.find((f) => f.id === savedSettings.font_family) || FONT_OPTIONS[0];
         setTheme({
           themeId: savedSettings.theme,
-          customBackground: savedSettings.custom_background || null,
-          background: savedSettings.custom_background || preset.background,
+          background: preset.background,
+          surface: preset.surface,
           textColor: preset.textColor,
           fontId: font.id,
           font: font.stack,
@@ -392,7 +387,7 @@ export default function Reader() {
           alignItems: "center",
           justifyContent: "space-between",
           padding: "0 24px",
-          background: theme.themeId === "dark" || theme.themeId === "night" ? "rgba(27,27,31,0.9)" : "rgba(252,249,248,0.9)",
+          background: hexToRgba(theme.background, 0.9),
           backdropFilter: "blur(12px)",
           borderBottom: "1px solid rgba(194,201,187,0.3)",
           flexShrink: 0,
@@ -559,7 +554,7 @@ export default function Reader() {
           justifyContent: "space-between",
           gap: 24,
           padding: "0 24px",
-          background: theme.themeId === "dark" || theme.themeId === "night" ? "rgba(27,27,31,0.95)" : "rgba(252,249,248,0.95)",
+          background: hexToRgba(theme.background, 0.95),
           backdropFilter: "blur(12px)",
           borderTop: "1px solid rgba(194,201,187,0.3)",
           flexShrink: 0,
@@ -657,8 +652,8 @@ function ReflowView({ data, theme, currentPage, setCurrentPage, pageRefs }) {
       style={{
         maxWidth: 720,
         margin: "0 auto",
-        background: theme.themeId === "sepia" ? "#fdfbf6" : theme.themeId === "dark" ? "#262626" : theme.themeId === "night" ? "#1e293b" : "var(--surface-container-lowest)",
-        border: "1px solid var(--outline-variant)",
+        background: theme.surface,
+        border: `1px solid ${hexToRgba(theme.textColor, 0.16)}`,
         borderRadius: 12,
         boxShadow: "0 4px 30px rgba(63,56,39,0.05)",
         padding: "56px 64px",
@@ -710,7 +705,7 @@ function ReflowView({ data, theme, currentPage, setCurrentPage, pageRefs }) {
           pageIdx < pages.length - 1 ? (
             <div
               key={`pb-${page.page_number || pageIdx}`}
-              style={{ borderTop: "1px solid rgba(128,128,128,0.25)", margin: "2.5em auto", width: "40%", textAlign: "center" }}
+              style={{ borderTop: `1px solid ${hexToRgba(theme.textColor, 0.2)}`, margin: "2.5em auto", width: "40%", textAlign: "center" }}
             />
           ) : null,
         ];
@@ -774,6 +769,9 @@ function HighlightsPanel({ annotations, bookId, setAnnotations, theme, onClose }
       style={{
         width: 340,
         borderLeft: "1px solid rgba(194,201,187,0.3)",
+        borderTopLeftRadius: 16,
+        borderBottomLeftRadius: 16,
+        overflow: "hidden",
         background: "var(--surface-container-low)",
         color: "var(--on-surface)",
         display: "flex",

@@ -140,8 +140,7 @@ class UserSettings(Base):
     __tablename__ = "user_settings"
 
     user_id = Column(UUID(as_uuid=False), ForeignKey("users.id"), primary_key=True)
-    theme = Column(String, default="sepia")  # light | dark | sepia | night | mint | rose
-    custom_background = Column(String, nullable=True)  # hex, e.g. #f4ecd8
+    theme = Column(String, default="sepia")  # light | dark | sepia | night | mint | rose | paper | modern | ocean | forest
     font_family = Column(String, default="serif")  # serif | sans | dyslexic
     font_size = Column(Integer, default=20)
     line_spacing = Column(Float, default=1.6)

@@ -342,7 +342,7 @@ export default function BookPaginate({ blocks, theme, initialProgress = 0, onPag
     return () => window.removeEventListener("keydown", onKey);
   }, [flip]);
 
-  const paper = paperFor(theme.themeId);
+  const paper = theme.surface || paperFor(theme.themeId);
   const controlsDisabled = !pages || N === 0;
 
   const pageElements = useMemo(() => {
