@@ -1,0 +1,23 @@
+name: cloudread
+description: CloudRead — cloud-native PDF reading app
+publish_to: "none"
+version: 0.1.0
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.2
+  provider: ^6.1.2
+  syncfusion_flutter_pdfviewer: ^26.2.9  # fixed-layout PDF rendering
+  shared_preferences: ^2.3.2             # small local cache (theme prefs, not full files)
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
