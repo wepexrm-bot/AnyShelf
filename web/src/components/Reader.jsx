@@ -1,5 +1,5 @@
 ﻿import React, { useCallback, useEffect, useRef, useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useLocation } from "react-router-dom";
 import ThemeControls, { FONT_OPTIONS, THEME_PRESETS } from "./ThemeControls";
 import BookPaginate from "./BookPaginate";
 import { api } from "../api";
@@ -77,6 +77,8 @@ function readerThemeVars(theme) {
 export default function Reader() {
   const { bookId } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
+  const backTo = location.state?.from || "/";
   const [book, setBook] = useState(null);
   const [structuredText, setStructuredText] = useState(null);
   const [theme, setTheme] = useState(DEFAULT_THEME);
@@ -172,6 +174,13 @@ export default function Reader() {
 
   useEffect(() => {
     (async () => {
+      setBook(null);
+      setStructuredText(null);
+      setPageCount(0);
+      setProgress(0);
+      setProgressLoaded(false);
+      setCurrentPage(0);
+      setAnnotations([]);
       const data = await api(`/books/${bookId}`);
       setBook(data);
       if (data.structured_text_url) {
@@ -390,7 +399,7 @@ export default function Reader() {
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-          <button className="btn-icon" onClick={() => navigate("/")} title="Back to library">
+          <button className="btn-icon" onClick={() => navigate(backTo)} title="Back to library">
             <span className="icon" style={{ fontSize: 22 }}>arrow_back</span>
           </button>
         </div>
@@ -483,9 +492,11 @@ export default function Reader() {
           {reflowAvailable ? (
             theme.mode === "paginate" ? (
               <BookPaginate
+                key={book.id}
+                contentKey={book.id}
                 blocks={allBlocks}
                 theme={theme}
-                initialProgress={progress}
+                initialProgress={progressLoaded ? progress : 0}
                 onPageChange={handleBookPageChange}
                 spread={theme.pageLayout === "spread"}
               />

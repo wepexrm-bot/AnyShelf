@@ -135,7 +135,7 @@ const paperFor = (themeId) =>
     ? "#1e293b"
     : "#fffdfb";
 
-export default function BookPaginate({ blocks, theme, initialProgress = 0, onPageChange, onPageCount, spread = false }) {
+export default function BookPaginate({ blocks, theme, initialProgress = 0, onPageChange, onPageCount, spread = false, contentKey }) {
   const wrapRef = useRef(null);
   const flipRef = useRef(null);
   const [layout, setLayout] = useState(null);
@@ -147,7 +147,28 @@ export default function BookPaginate({ blocks, theme, initialProgress = 0, onPag
   const [jumpValue, setJumpValue] = useState("1");
   const [flipGen, setFlipGen] = useState(0);
 
-  const resumeFractionRef = useRef(initialProgress > 0 ? initialProgress / 100 : null);
+  const resumeFractionRef = useRef(null);
+  const hadInitialProgressRef = useRef(false);
+
+  // When the book changes, drop all resume/restore state from the previous
+  // book so the new book can't inherit the old one's position or pages.
+  useEffect(() => {
+    hadInitialProgressRef.current = false;
+    resumeFractionRef.current = null;
+    setReady(false);
+  }, [contentKey]);
+
+  // Apply the freshly loaded saved progress once per book. `initialProgress`
+  // starts at 0 while the server response is in flight, so it must be able to
+  // latch the real value when it arrives; after that, later progress changes
+  // (from normal page turns) must NOT re-apply a restore.
+  useEffect(() => {
+    if (initialProgress > 0 && !hadInitialProgressRef.current) {
+      hadInitialProgressRef.current = true;
+      resumeFractionRef.current = initialProgress / 100;
+      setFlipGen((g) => g + 1);
+    }
+  }, [initialProgress, contentKey]);
 
   const headingFont = useMemo(() => {
     let f = theme.font;
@@ -211,7 +232,7 @@ export default function BookPaginate({ blocks, theme, initialProgress = 0, onPag
   }, [layout, fontsReady, spread]);
 
   const pageKey = metrics
-    ? `${metrics.contentH}|${metrics.textW}|${theme.fontSize}|${ls(theme)}|${theme.font}|${headingFont}`
+    ? `${contentKey || "?"}|${metrics.contentH}|${metrics.textW}|${theme.fontSize}|${ls(theme)}|${theme.font}|${headingFont}`
     : null;
 
   useEffect(() => {

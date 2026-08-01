@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useSearchParams, useLocation } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import { api } from "../api";
 import AppHeader from "./AppHeader";
@@ -99,6 +99,7 @@ function ProgressBar({ value }) {
 
 export default function Library() {
   const { openCreateShelf } = useShelfModal();
+  const location = useLocation();
   const [books, setBooks] = useState([]);
   const [shelves, setShelves] = useState([]);
   const [stats, setStats] = useState(null);
@@ -473,6 +474,7 @@ export default function Library() {
                     <div style={{ display: "flex", gap: 12, marginTop: 20 }}>
                       <Link
                         to={`/read/${continueReading.id}`}
+                        state={{ from: location.pathname }}
                         className="btn btn-primary"
                         style={{ padding: "12px 32px", borderRadius: 999 }}
                       >
@@ -753,6 +755,7 @@ export default function Library() {
                       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
                         <Link
                           to={`/read/${book.id}`}
+                          state={{ from: location.pathname }}
                           style={{ fontWeight: 600, fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", display: "block" }}
                         >
                           {book.title}

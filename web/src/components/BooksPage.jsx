@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useSearchParams, useLocation } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import { api } from "../api";
 import AppHeader from "./AppHeader";
@@ -38,10 +38,12 @@ function searchableText(book) {
 
 function BookCard({ book }) {
   const accent = accentFor(book);
+  const location = useLocation();
   return (
     <div className="book-card">
       <Link
         to={`/read/${book.id}`}
+        state={{ from: location.pathname }}
         className="book-card__cover"
         style={
           book.cover_url

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useSearchParams, useLocation } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import { api } from "../api";
 import AppHeader from "./AppHeader";
@@ -34,6 +34,7 @@ function timeAgo(dateStr) {
 
 function ShelfDetail({ shelf, books, onClose, onEdit, onDelete, onChanged }) {
   const [allBooks, setAllBooks] = useState(null);
+  const location = useLocation();
 
   useEffect(() => {
     api(`/shelves/${shelf.id}`).then((d) => setAllBooks(d.books)).catch(() => setAllBooks([]));
@@ -109,7 +110,7 @@ function ShelfDetail({ shelf, books, onClose, onEdit, onDelete, onChanged }) {
                     <span className="icon" style={{ fontSize: 16 }}>auto_stories</span>
                   </span>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <Link to={`/read/${b.id}`} className="book-row__title" style={{ display: "block" }}>
+                    <Link to={`/read/${b.id}`} state={{ from: location.pathname }} className="book-row__title" style={{ display: "block" }}>
                       {b.title}
                     </Link>
                     <div className="text-muted" style={{ fontSize: 12 }}>
