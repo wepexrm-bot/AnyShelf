@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../models/annotation.dart';
@@ -96,11 +97,15 @@ class BooksService {
     final res = await http.get(Uri.parse(url)); // pre-signed URL, no auth
     if (res.statusCode != 200 || res.body.isEmpty) return null;
     try {
-      return StructuredText.fromJson(jsonDecode(res.body) as Map<String, dynamic>);
+      // Decode off the UI isolate so large books don't jank the reader open.
+      return await compute(_decodeStructuredText, res.body);
     } catch (_) {
       return null;
     }
   }
+
+  static StructuredText _decodeStructuredText(String body) =>
+      StructuredText.fromJson(jsonDecode(body) as Map<String, dynamic>);
 
   /// Highlights + notes for a book.
   Future<List<Annotation>> annotations(String bookId) async {

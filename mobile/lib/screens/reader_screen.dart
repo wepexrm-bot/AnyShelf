@@ -35,16 +35,26 @@ class _ReaderScreenState extends State<ReaderScreen> {
   late ReaderSettings _settings = ReaderSettings.defaults();
   StructuredText? _structured;
   String? _pdfUrl; // resolved from GET /books/{id} (list omits pdf_url)
-  bool _uiVisible = true;
+  bool _uiVisible = false;
   bool _bookmarked = false;
   String? _bookmarkId; // backend annotation id of the current bookmark, if any
   bool _loading = true;
   String? _error;
   Timer? _saveTimer;
 
+  // cached, time-sliced pagination state
+  List<List<(TextBlock, int)>>? _pages;
+  String? _pagesKey;
+  Timer? _paginateTimer;
+  bool _paginating = false;
+
   // highlight state
   Map<int, String> _highlights = {}; // global block index -> color hex
   _HighlightMenuState? _highlightMenu;
+
+  // page tracking for the footer (paginated mode)
+  int _currentPage = 0;
+  int _pageCount = 0;
 
   final ValueNotifier<double> _progressNotifier = ValueNotifier(0);
 
@@ -61,6 +71,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   @override
   void dispose() {
     _saveTimer?.cancel();
+    _paginateTimer?.cancel();
     _scrollController.dispose();
     _pageController.dispose();
     _progressNotifier.dispose();
@@ -71,16 +82,14 @@ class _ReaderScreenState extends State<ReaderScreen> {
     setState(() => _loading = true);
     try {
       final detail = await _booksService.get(widget.book.id);
-      final settings = await _settingsService.fetch();
-      StructuredText? structured;
-      if (detail.structuredTextUrl != null) {
-        structured = await _booksService.structuredText(detail);
-      }
-      double progress = 0;
-      try {
-        progress = await _booksService.progress(widget.book.id);
-      } catch (_) {}
-      final bookmark = await _loadBookmark();
+      final (settings, bookmark, progress, structured) = await (
+        _settingsService.fetch(),
+        _loadBookmark(),
+        _booksService.progress(widget.book.id).onError((_, __) => 0.0),
+        detail.structuredTextUrl != null
+            ? _booksService.structuredText(detail)
+            : Future<StructuredText?>.value(null),
+      ).wait;
       if (!mounted) return;
       setState(() {
         _settings = settings;
@@ -210,23 +219,49 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
     return Scaffold(
       backgroundColor: _settings.atmosphere.background,
-      body: GestureDetector(
-        behavior: HitTestBehavior.translucent,
-        onTap: _handleTap,
-        child: Stack(
-          key: _readingKey,
-          children: [
-            Positioned.fill(child: _readingSurface()),
-            if (_highlightMenu != null) _buildHighlightMenu(),
-            _buildTopBar(),
-            _buildBottomBar(),
-          ],
-        ),
+      body: Stack(
+        key: _readingKey,
+        children: [
+          Positioned.fill(
+            child: Listener(
+              behavior: HitTestBehavior.translucent,
+              onPointerDown: _onPointerDown,
+              onPointerUp: _onPointerUp,
+              onPointerCancel: (_) => _tapDownPos = null,
+              child: _readingSurface(),
+            ),
+          ),
+          if (_highlightMenu != null) _buildHighlightMenu(),
+          _buildTopBar(),
+          _buildBottomBar(),
+        ],
       ),
     );
   }
 
-  void _handleTap() {
+  // Raw pointer tap detection. The reading surface (especially the PDF viewer)
+  // claims normal tap gestures internally, so a GestureDetector on top would
+  // never see taps. A Listener sees every pointer event regardless, letting us
+  // toggle the chrome with a quick tap while still scrolling/pinching the book.
+  Offset? _tapDownPos;
+  DateTime _tapDownAt = DateTime.now();
+
+  void _onPointerDown(PointerDownEvent e) {
+    _tapDownPos = e.position;
+    _tapDownAt = DateTime.now();
+  }
+
+  void _onPointerUp(PointerUpEvent e) {
+    final down = _tapDownPos;
+    if (down == null) return;
+    _tapDownPos = null;
+    final moved = (e.position - down).distance > 14;
+    final quick = DateTime.now().difference(_tapDownAt) <
+        const Duration(milliseconds: 400);
+    if (!moved && quick) _toggleChrome();
+  }
+
+  void _toggleChrome() {
     setState(() {
       _uiVisible = !_uiVisible;
       _highlightMenu = null;
@@ -277,8 +312,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   Widget _paginatedView() {
-    final pages = _paginate();
-    if (pages.isEmpty) {
+    _ensurePaginated();
+    final pages = _pages;
+    if (pages == null || pages.isEmpty) {
       return const Center(child: CircularProgressIndicator());
     }
     return NotificationListener<ScrollNotification>(
@@ -316,7 +352,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
         onLongPressStart: (details) => _onLongPress(globalIndex, block, details),
         child: Container(
           color: highlightColor != null ? _parseColor(highlightColor) : null,
-          child: Text(block.text, style: style),
+          child: Text(block.text, style: style, textAlign: _settings.textAlign),
         ),
       ),
     );
@@ -324,51 +360,89 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   // ------------------------------------------------------------- pagination
 
-  /// Chunks blocks into pages using real [TextPainter] measurement, splitting
-  /// any paragraph that would exceed a page.
-  List<List<(TextBlock, int)>> _paginate() {
-    final blocks = _structured!.allBlocks;
-    if (blocks.isEmpty) return [];
+  String _paginateKey() {
+    final size = MediaQuery.sizeOf(context);
+    return '${_settings.fontFamily}|${_fontSize.toStringAsFixed(2)}|'
+        '${_lineSpacing.toStringAsFixed(3)}|${_readingInset.toStringAsFixed(1)}|'
+        '${size.width.toStringAsFixed(1)}|${size.height.toStringAsFixed(1)}';
+  }
 
-    final width = MediaQuery.sizeOf(context).width - (2 * _readingInset);
-    final height = MediaQuery.sizeOf(context).height * 0.78;
+  /// Lazily (re)computes the page layout. Measurement is time-sliced across
+  /// frames so the UI thread never blocks, and the result is cached keyed by
+  /// the settings that affect layout, so taps/builds don't re-paginate.
+  void _ensurePaginated() {
+    if (!_reflowAvailable || _settings.mode != ReaderMode.paginated) return;
+    final key = _paginateKey();
+    if (_pages != null && _pagesKey == key) return;
+    if (_paginating) return;
+    _paginating = true;
+    _pages = null;
+    _paginateInChunks(key);
+  }
+
+  void _paginateInChunks(String key) {
+    final blocks = _structured!.allBlocks;
+    if (blocks.isEmpty) {
+      _pages = [];
+      _pagesKey = key;
+      _paginating = false;
+      return;
+    }
+    final size = MediaQuery.sizeOf(context);
+    final width = size.width - (2 * _readingInset);
+    final height = size.height * 0.78;
     final pages = <List<(TextBlock, int)>>[];
     var current = <(TextBlock, int)>[];
     var used = 0.0;
+    var i = 0;
 
-    for (var i = 0; i < blocks.length; i++) {
-      final b = blocks[i];
-      final style = b.isHeading ? _headingStyle : _bodyStyle;
-      final tp = TextPainter(
-        text: TextSpan(text: b.text, style: style),
-        textDirection: TextDirection.ltr,
-      )..layout(maxWidth: width);
-      final blockHeight = tp.height + (b.isHeading ? 12 : 20);
-      tp.dispose();
+    _paginateTimer?.cancel();
+    _paginateTimer = Timer.periodic(const Duration(milliseconds: 16), (timer) {
+      final deadline = DateTime.now().add(const Duration(milliseconds: 8));
+      while (i < blocks.length && DateTime.now().isBefore(deadline)) {
+        final b = blocks[i];
+        final style = b.isHeading ? _headingStyle : _bodyStyle;
+        final tp = TextPainter(
+          text: TextSpan(text: b.text, style: style),
+          textDirection: TextDirection.ltr,
+        )..layout(maxWidth: width);
+        final blockHeight = tp.height + (b.isHeading ? 12 : 20);
+        tp.dispose();
 
-      if (blockHeight > height) {
-        if (current.isNotEmpty) {
-          pages.add(current);
-          current = <(TextBlock, int)>[];
-          used = 0;
+        if (blockHeight > height) {
+          if (current.isNotEmpty) {
+            pages.add(current);
+            current = <(TextBlock, int)>[];
+            used = 0;
+          }
+          final chunks = _splitParagraph(b, width, height);
+          for (final chunk in chunks) {
+            pages
+                .add([(TextBlock(kind: b.kind, text: chunk, level: b.level), i)]);
+          }
+        } else {
+          if (current.isNotEmpty && used + blockHeight > height) {
+            pages.add(current);
+            current = <(TextBlock, int)>[];
+            used = 0;
+          }
+          current.add((b, i));
+          used += blockHeight;
         }
-        final chunks = _splitParagraph(b, width, height);
-        for (final chunk in chunks) {
-          pages.add([(TextBlock(kind: b.kind, text: chunk, level: b.level), i)]);
-        }
-        continue;
+        i++;
       }
-
-      if (current.isNotEmpty && used + blockHeight > height) {
-        pages.add(current);
-        current = <(TextBlock, int)>[];
-        used = 0;
+      if (i >= blocks.length) {
+        timer.cancel();
+        _paginateTimer = null;
+        if (current.isNotEmpty) pages.add(current);
+        if (!mounted) return;
+        setState(() {
+          _pages = pages;
+          _pagesKey = key;
+          _paginating = false;
+        });
       }
-      current.add((b, i));
-      used += blockHeight;
-    }
-    if (current.isNotEmpty) pages.add(current);
-    return pages;
+    });
   }
 
   List<String> _splitParagraph(TextBlock block, double width, double height) {
@@ -425,6 +499,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
     if (total <= 1) {
       _updateProgress(1.0);
       return;
+    }
+    if (index + 1 != _currentPage || total != _pageCount) {
+      setState(() {
+        _currentPage = index + 1;
+        _pageCount = total;
+      });
     }
     _updateProgress(index / (total - 1));
   }
@@ -540,6 +620,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   // ----------------------------------------------------------------- chrome
 
   Widget _buildTopBar() {
+    final text = _settings.atmosphere.text;
     return AnimatedSlide(
       duration: const Duration(milliseconds: 250),
       curve: Curves.easeOut,
@@ -552,178 +633,61 @@ class _ReaderScreenState extends State<ReaderScreen> {
             top: MediaQuery.paddingOf(context).top,
           ),
           decoration: BoxDecoration(
-            color: _settings.atmosphere.background.withValues(alpha: 0.92),
+            color: _settings.atmosphere.background.withValues(alpha: 0.9),
             border: Border(
               bottom: BorderSide(
-                color: _settings.atmosphere.text.withValues(alpha: 0.12),
+                color: _settings.atmosphere.text.withValues(alpha: 0.1),
               ),
             ),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withValues(alpha: 0.06),
-                blurRadius: 12,
+                color: Colors.black.withValues(alpha: 0.05),
+                blurRadius: 8,
               ),
             ],
           ),
           child: SafeArea(
             bottom: false,
-            child: Row(
-              children: [
-                IconButton(
-                  onPressed: () => Navigator.pop(context),
-                  icon: Icon(Icons.arrow_back,
-                      color: _settings.atmosphere.text),
-                  tooltip: 'Back to library',
-                ),
-                Expanded(
-                  child: Column(
-                    children: [
-                      Text(
-                        widget.book.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: SereneType.uiBody.copyWith(
-                          color: _settings.atmosphere.text,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                      if (widget.book.author != null &&
-                          widget.book.author!.isNotEmpty)
+            child: SizedBox(
+              height: 56,
+              child: Row(
+                children: [
+                  IconButton(
+                    onPressed: () => Navigator.pop(context),
+                    icon: Icon(Icons.arrow_back, color: text),
+                    tooltip: 'Back to library',
+                  ),
+                  Expanded(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
                         Text(
-                          widget.book.author!,
+                          widget.book.title,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: SereneType.labelSm.copyWith(
-                            color: _settings.atmosphere.text.withValues(alpha: 0.7),
+                          style: SereneType.uiBody.copyWith(
+                            color: text,
+                            fontWeight: FontWeight.w500,
                           ),
                         ),
-                    ],
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.cloud_done,
-                          size: 16, color: _settings.atmosphere.accent),
-                      const SizedBox(width: 4),
-                      _BreathingDot(color: _settings.atmosphere.accent),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildBottomBar() {
-    final text = _settings.atmosphere.text;
-    final accent = _settings.atmosphere.accent;
-    return Align(
-      alignment: Alignment.bottomCenter,
-      child: AnimatedSlide(
-        duration: const Duration(milliseconds: 250),
-        curve: Curves.easeOut,
-        offset: _uiVisible ? Offset.zero : const Offset(0, 1.2),
-        child: AnimatedOpacity(
-          duration: const Duration(milliseconds: 250),
-          opacity: _uiVisible ? 1 : 0,
-          child: Container(
-            padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
-            decoration: BoxDecoration(
-              color: _settings.atmosphere.background.withValues(alpha: 0.94),
-              borderRadius: SereneShape.sheetTop,
-              border: Border(
-                top: BorderSide(color: text.withValues(alpha: 0.1)),
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.08),
-                  blurRadius: 20,
-                  offset: const Offset(0, -4),
-                ),
-              ],
-            ),
-            child: SafeArea(
-              top: false,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  ValueListenableBuilder<double>(
-                    valueListenable: _progressNotifier,
-                    builder: (context, value, _) {
-                      final percent = (value * 100).round();
-                      return Row(
-                        children: [
-                          Text('$percent%',
-                              style: SereneType.labelSm.copyWith(
-                                  color: text.withValues(alpha: 0.7))),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: SliderTheme(
-                              data: SliderThemeData(
-                                trackHeight: 8,
-                                activeTrackColor: accent,
-                                inactiveTrackColor:
-                                    text.withValues(alpha: 0.18),
-                                thumbColor: accent,
-                                thumbShape: const RoundSliderThumbShape(
-                                    enabledThumbRadius: 12),
-                                overlayShape: const RoundSliderOverlayShape(
-                                    overlayRadius: 20),
-                              ),
-                              child: Slider(
-                                value: value.clamp(0.0, 1.0),
-                                onChanged: (v) {
-                                  _updateProgress(v);
-                                  _scrollToProgress(v);
-                                },
-                              ),
+                        if (widget.book.author != null &&
+                            widget.book.author!.isNotEmpty)
+                          Text(
+                            widget.book.author!,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: SereneType.labelSm.copyWith(
+                              color: text.withValues(alpha: 0.7),
                             ),
                           ),
-                        ],
-                      );
-                    },
+                      ],
+                    ),
                   ),
-                  const SizedBox(height: 8),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceAround,
-                    children: [
-                      _ReaderAction(
-                        icon: Icons.font_download,
-                        color: text,
-                        accent: accent,
-                        onTap: () => _openAppearance(),
-                      ),
-                      _ReaderAction(
-                        icon: Icons.search,
-                        color: text,
-                        accent: accent,
-                        onTap: _openSearch,
-                      ),
-                      _ReaderAction(
-                        icon: Icons.bookmark,
-                        filled: _bookmarked,
-                        color: text,
-                        accent: accent,
-                        onTap: _toggleBookmark,
-                      ),
-                      _ReaderAction(
-                        icon: Icons.volume_up,
-                        color: text,
-                        accent: accent,
-                        onTap: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                                content: Text('Text-to-speech coming soon')),
-                          );
-                        },
-                      ),
-                    ],
+                  Padding(
+                    padding: const EdgeInsets.only(right: 12),
+                    child: _SyncIndicator(
+                      color: _settings.atmosphere.accent,
+                    ),
                   ),
                 ],
               ),
@@ -734,24 +698,86 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
+  Widget _buildBottomBar() {
+    return Align(
+      alignment: Alignment.bottomCenter,
+      child: AnimatedSlide(
+        duration: const Duration(milliseconds: 250),
+        curve: Curves.easeOut,
+        offset: _uiVisible ? Offset.zero : const Offset(0, 1.2),
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 250),
+          opacity: _uiVisible ? 1 : 0,
+          child: ValueListenableBuilder<double>(
+            valueListenable: _progressNotifier,
+            builder: (context, value, _) => _ReaderFooter(
+              progress: value,
+              pageCount: _pageCount,
+              bookmarked: _bookmarked,
+              background: _settings.atmosphere.background,
+              text: _settings.atmosphere.text,
+              accent: _settings.atmosphere.accent,
+              onSeek: (v) {
+                _updateProgress(v);
+                _scrollToProgress(v);
+              },
+              onAppearance: _openAppearance,
+              onSearch: _openSearch,
+              onToggleBookmark: _toggleBookmark,
+              onTts: () {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Text-to-speech coming soon')),
+                );
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   void _scrollToProgress(double fraction) {
-    if (_settings.mode == ReaderMode.paginated || !_reflowAvailable) return;
+    if (!_reflowAvailable) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_settings.mode == ReaderMode.paginated) {
+        final pages = _pages;
+        if (pages == null || pages.isEmpty || !_pageController.hasClients) {
+          return;
+        }
+        final target = (fraction * (pages.length - 1)).round();
+        _pageController.animateToPage(
+          target,
+          duration: const Duration(milliseconds: 400),
+          curve: Curves.easeOut,
+        );
+        _onPageChanged(target, pages.length);
+        return;
+      }
       if (_scrollController.hasClients) {
-        _scrollController.jumpTo(fraction * _scrollController.position.maxScrollExtent);
+        _scrollController.jumpTo(
+            fraction * _scrollController.position.maxScrollExtent);
       }
     });
   }
 
-  Future<void> _openAppearance() async {
-    await showModalBottomSheet<void>(
+  /// Opens the "Appearance" sheet (bottom sheet, max 90% height) matching the
+  /// AnyShelf design. The reader stays visible and dimmed behind it, so the
+  /// settings never hide the book entirely.
+  Future<void> _openAppearance() {
+    return showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      builder: (_) => ReaderAppearanceSheet(
-        initial: _settings,
-        reflowAvailable: _reflowAvailable,
-        onChanged: _updateSettings,
+      backgroundColor: Colors.transparent,
+      builder: (_) => ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * 0.9,
+        ),
+        child: ReaderAppearanceSheet(
+          initial: _settings,
+          reflowAvailable: _reflowAvailable,
+          onChanged: _updateSettings,
+        ),
       ),
     );
   }
@@ -846,7 +872,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   void _jumpToPageContaining(int index) {
-    final pages = _paginate();
+    final pages = _pages;
+    if (pages == null) return;
     for (var i = 0; i < pages.length; i++) {
       if (pages[i].any((e) => e.$2 == index)) {
         _pageController.animateToPage(
@@ -870,32 +897,6 @@ class _HighlightMenuState {
     required this.anchor,
     required this.position,
   });
-}
-
-class _ReaderAction extends StatelessWidget {
-  final IconData icon;
-  final bool filled;
-  final Color color;
-  final Color accent;
-  final VoidCallback onTap;
-  const _ReaderAction({
-    required this.icon,
-    required this.color,
-    required this.accent,
-    required this.onTap,
-    this.filled = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Icon(icon, size: 28, color: filled ? accent : color),
-      ),
-    );
-  }
 }
 
 class _HighlightMenu extends StatelessWidget {
@@ -965,19 +966,143 @@ class _HighlightMenu extends StatelessWidget {
   }
 }
 
-class _BreathingDot extends StatefulWidget {
-  final Color color;
-  const _BreathingDot({required this.color});
+/// The reader's bottom chrome: a scrubbable progress slider with percent/pages
+/// labels and a row of action buttons (typography, search, bookmark, text to
+/// speech). Matches the AnyShelf immersive-reader design.
+class _ReaderFooter extends StatelessWidget {
+  final double progress;
+  final int pageCount;
+  final bool bookmarked;
+  final Color background;
+  final Color text;
+  final Color accent;
+  final ValueChanged<double> onSeek;
+  final VoidCallback onAppearance;
+  final VoidCallback onSearch;
+  final VoidCallback onToggleBookmark;
+  final VoidCallback onTts;
+  const _ReaderFooter({
+    required this.progress,
+    required this.pageCount,
+    required this.bookmarked,
+    required this.background,
+    required this.text,
+    required this.accent,
+    required this.onSeek,
+    required this.onAppearance,
+    required this.onSearch,
+    required this.onToggleBookmark,
+    required this.onTts,
+  });
 
   @override
-  State<_BreathingDot> createState() => _BreathingDotState();
+  Widget build(BuildContext context) {
+    final muted = text.withValues(alpha: 0.7);
+    final percent = (progress.clamp(0.0, 1.0) * 100).round();
+    final pages = pageCount > 0 ? '$pageCount p.' : '— p.';
+    return Container(
+      decoration: BoxDecoration(
+        color: background.withValues(alpha: 0.95),
+        border: Border(
+          top: BorderSide(color: text.withValues(alpha: 0.1)),
+        ),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.05),
+            blurRadius: 12,
+            offset: const Offset(0, -4),
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                SizedBox(
+                  width: 36,
+                  child: Text(
+                    '$percent%',
+                    textAlign: TextAlign.right,
+                    style: SereneType.labelSm.copyWith(color: muted),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _SeekBar(
+                    fraction: progress,
+                    fill: accent,
+                    track: text.withValues(alpha: 0.22),
+                    onSeek: onSeek,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                SizedBox(
+                  width: 48,
+                  child: Text(
+                    pages,
+                    textAlign: TextAlign.left,
+                    style: SereneType.labelSm.copyWith(color: muted),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                _FooterAction(
+                  icon: Icons.font_download,
+                  color: text,
+                  onTap: onAppearance,
+                  tooltip: 'Appearance',
+                ),
+                _FooterAction(
+                  icon: Icons.search,
+                  color: text,
+                  onTap: onSearch,
+                  tooltip: 'Search in this book',
+                ),
+                _FooterAction(
+                  icon: bookmarked ? Icons.bookmark : Icons.bookmark_border,
+                  color: bookmarked ? accent : text,
+                  onTap: onToggleBookmark,
+                  tooltip: 'Bookmark this page',
+                ),
+                _FooterAction(
+                  icon: Icons.volume_up,
+                  color: text,
+                  onTap: onTts,
+                  tooltip: 'Text to speech',
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
-class _BreathingDotState extends State<_BreathingDot>
+/// A sync status indicator in the reader header: a small cloud icon with a
+/// gently breathing dot, matching the AnyShelf design.
+class _SyncIndicator extends StatefulWidget {
+  final Color color;
+  const _SyncIndicator({required this.color});
+
+  @override
+  State<_SyncIndicator> createState() => _SyncIndicatorState();
+}
+
+class _SyncIndicatorState extends State<_SyncIndicator>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller = AnimationController(
     vsync: this,
-    duration: const Duration(milliseconds: 2000),
+    duration: const Duration(seconds: 2),
   )..repeat(reverse: true);
 
   @override
@@ -988,22 +1113,129 @@ class _BreathingDotState extends State<_BreathingDot>
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, _) {
-        final t = _controller.value;
-        return Opacity(
-          opacity: 0.55 + (0.45 * t),
-          child: Transform.scale(
-            scale: 0.9 + (0.25 * t),
-            child: Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(color: widget.color, shape: BoxShape.circle),
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(Icons.cloud_done, size: 16, color: widget.color),
+        const SizedBox(width: 6),
+        ScaleTransition(
+          scale: Tween<double>(begin: 0.85, end: 1.15).animate(
+            CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
+          ),
+          child: Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(
+              color: widget.color,
+              shape: BoxShape.circle,
             ),
           ),
-        );
-      },
+        ),
+      ],
     );
   }
 }
+
+/// A large tappable action button used in the reader footer.
+class _FooterAction extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final VoidCallback onTap;
+  final String tooltip;
+  const _FooterAction({
+    required this.icon,
+    required this.color,
+    required this.onTap,
+    required this.tooltip,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      onPressed: onTap,
+      icon: Icon(icon, size: 28, color: color),
+      tooltip: tooltip,
+      padding: const EdgeInsets.all(10),
+    );
+  }
+}
+
+/// A horizontal reading-progress slider you can tap or drag to scrub through
+/// the book: a filled accent track with a small thumb, web-app style.
+class _SeekBar extends StatelessWidget {
+  final double fraction;
+  final Color fill;
+  final Color track;
+  final ValueChanged<double> onSeek;
+  const _SeekBar({
+    required this.fraction,
+    required this.fill,
+    required this.track,
+    required this.onSeek,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final f = fraction.clamp(0.0, 1.0);
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTapDown: (d) => onSeek(_fractionFromX(context, d.localPosition.dx)),
+      onHorizontalDragUpdate: (d) =>
+          onSeek(_fractionFromX(context, d.localPosition.dx)),
+      child: SizedBox(
+        height: 28,
+        child: Center(
+          child: Stack(
+            alignment: Alignment.centerLeft,
+            children: [
+              Container(
+                height: 6,
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  color: track,
+                  borderRadius: BorderRadius.circular(3),
+                ),
+              ),
+              FractionallySizedBox(
+                widthFactor: f,
+                child: Container(
+                  height: 6,
+                  decoration: BoxDecoration(
+                    color: fill,
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                ),
+              ),
+              FractionallySizedBox(
+                widthFactor: f == 0 ? 0.001 : f,
+                alignment: Alignment.centerRight,
+                child: Container(
+                  width: 18,
+                  height: 18,
+                  decoration: BoxDecoration(
+                    color: fill,
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.25),
+                        blurRadius: 4,
+                        offset: const Offset(0, 1),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  double _fractionFromX(BuildContext context, double dx) {
+    final width = MediaQuery.sizeOf(context).width - 32 - 24;
+    if (width <= 0) return 0;
+    return (dx / width).clamp(0.0, 1.0);
+  }
+}
+

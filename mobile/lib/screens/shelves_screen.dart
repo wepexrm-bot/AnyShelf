@@ -417,7 +417,31 @@ class _ShelfDetailScreen extends StatefulWidget {
 class _ShelfDetailScreenState extends State<_ShelfDetailScreen> {
   late List<ShelfBook> _shelfBooks = widget.shelf.books;
   late Shelf _shelf = widget.shelf;
-  bool _loading = false;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  /// Fetches the full shelf — the list endpoint omits the books array, so the
+  /// detail view must load it before showing anything.
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    try {
+      final fresh = await widget.service.get(widget.shelf.id);
+      if (!mounted) return;
+      setState(() {
+        _shelf = fresh;
+        _shelfBooks = fresh.books;
+        _loading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+    }
+  }
 
   Future<void> _reload() async {
     try {

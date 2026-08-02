@@ -1,3 +1,5 @@
+import 'package:flutter/painting.dart';
+
 import '../theme/reader_atmosphere.dart';
 
 /// The reader's tunable preferences, matching the "Appearance" panel and the
@@ -64,6 +66,7 @@ class ReaderSettings {
   LineHeightLevel lineHeight;
   MarginLevel margins;
   ReaderMode mode;
+  TextAlign textAlign;
 
   ReaderSettings({
     required this.atmosphere,
@@ -72,6 +75,7 @@ class ReaderSettings {
     required this.lineHeight,
     required this.margins,
     required this.mode,
+    this.textAlign = TextAlign.justify,
   });
 
   factory ReaderSettings.defaults() => ReaderSettings(
@@ -90,6 +94,7 @@ class ReaderSettings {
     LineHeightLevel? lineHeight,
     MarginLevel? margins,
     ReaderMode? mode,
+    TextAlign? textAlign,
   }) =>
       ReaderSettings(
         atmosphere: atmosphere ?? this.atmosphere,
@@ -98,6 +103,7 @@ class ReaderSettings {
         lineHeight: lineHeight ?? this.lineHeight,
         margins: margins ?? this.margins,
         mode: mode ?? this.mode,
+        textAlign: textAlign ?? this.textAlign,
       );
 
   /// Actual pixel value of the reading font based on the chosen family.
