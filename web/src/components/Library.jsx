@@ -225,10 +225,11 @@ export default function Library() {
 
   const isCompleted = (b) => (bookProgress[b.id] || 0) >= 99.5;
 
-  const resumeBooks = useMemo(
-    () => books.filter((b) => !isCompleted(b) && (bookProgress[b.id] || 0) > 0),
-    [books, bookProgress]
-  );
+  const resumeBooks = useMemo(() => {
+    const inProgress = books.filter((b) => !isCompleted(b) && (bookProgress[b.id] || 0) > 0);
+    if (inProgress.length > 0) return inProgress;
+    return books.filter((b) => !isCompleted(b));
+  }, [books, bookProgress]);
   const recentlyAdded = filtered.slice(0, 3);
   const extractionFor = (book) =>
     extracting[book.id] || { status: book.extraction_status, progress: 0 };
