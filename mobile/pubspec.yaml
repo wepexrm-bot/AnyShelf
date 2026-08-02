@@ -10,6 +10,7 @@ dependencies:
   flutter:
     sdk: flutter
   http: ^1.2.2
+  http_parser: ^4.0.2
   provider: ^6.1.2
   syncfusion_flutter_pdfviewer: ^34.1.33 # fixed-layout PDF rendering
   syncfusion_flutter_core: ^34.1.33 # theme API used to set the PDF background

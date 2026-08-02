@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
 import '../models/annotation.dart';
 import '../models/book.dart';
 import 'api_client.dart';
@@ -26,16 +27,26 @@ class BooksService {
     'Non-Fiction', 'Other',
   ];
 
-  /// Uploads a PDF file with metadata. Returns the uploaded book payload.
+  /// Uploads a PDF file with metadata and an optional cover image. Returns the
+  /// uploaded book payload.
   Future<Map<String, dynamic>> upload({
     required String filename,
     required Uint8List bytes,
     required String title,
     required String author,
     String? genre,
+    Uint8List? coverBytes,
+    String? coverName,
   }) async {
     final files = <http.MultipartFile>[
       http.MultipartFile.fromBytes('file', bytes, filename: filename),
+      if (coverBytes != null && coverBytes.isNotEmpty)
+        http.MultipartFile.fromBytes(
+          'cover',
+          coverBytes,
+          filename: coverName ?? 'cover.jpg',
+          contentType: _coverContentType(coverName),
+        ),
     ];
     final data = await api.postMultipart('/books/upload', fields: {
       'title': title,
@@ -43,6 +54,13 @@ class BooksService {
       if (genre != null && genre.isNotEmpty) 'genre': genre,
     }, files: files);
     return data is Map<String, dynamic> ? data : <String, dynamic>{};
+  }
+
+  static MediaType _coverContentType(String? name) {
+    final lower = (name ?? '').toLowerCase();
+    if (lower.endsWith('.png')) return MediaType('image', 'png');
+    if (lower.endsWith('.webp')) return MediaType('image', 'webp');
+    return MediaType('image', 'jpeg');
   }
 
   Future<List<Book>> list() async {
