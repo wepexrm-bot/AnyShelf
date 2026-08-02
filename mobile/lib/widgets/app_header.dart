@@ -1,20 +1,24 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
+import '../services/ui_mode_controller.dart';
 import '../theme/serene_theme.dart';
 import '../theme/serene_tokens.dart';
 import 'sync_indicator.dart';
 
-/// Branded top bar: filled cloud glyph + "AnyShelf" wordmark (Literata, accent
-/// teal) on the left, optional trailing widget — by default the cloud sync
-/// status. Reads "top app bar" in the design, fixed with a soft blur.
+/// Branded top bar: filled cloud glyph + "AnyShelf" wordmark (Playfair, accent
+/// green) on the left, an optional light/dark toggle, and the trailing widget
+/// (by default the cloud sync status). Reads "top app bar" in the design.
 class AppHeader extends StatelessWidget {
   final Widget? trailing;
   final bool showSync;
+  final bool showThemeToggle;
   final EdgeInsetsGeometry padding;
   const AppHeader({
     super.key,
     this.trailing,
     this.showSync = true,
+    this.showThemeToggle = true,
     this.padding = const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
   });
 
@@ -39,6 +43,19 @@ class AppHeader extends StatelessWidget {
             ),
           ),
           const Spacer(),
+          if (showThemeToggle) ...[
+            Consumer<UiModeController>(
+              builder: (context, uiMode, _) => IconButton(
+                onPressed: uiMode.toggle,
+                tooltip: uiMode.isDark ? 'Switch to light mode' : 'Switch to dark mode',
+                icon: Icon(
+                  uiMode.isDark ? Icons.light_mode_outlined : Icons.dark_mode_outlined,
+                  color: colors.onSurfaceVariant,
+                ),
+              ),
+            ),
+            const SizedBox(width: 4),
+          ],
           trailing ?? (showSync ? const SyncIndicator() : const SizedBox()),
         ],
       ),

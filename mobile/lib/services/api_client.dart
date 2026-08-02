@@ -49,17 +49,73 @@ class ApiClient {
     return prefs.getString('auth_token');
   }
 
-  Future<dynamic> get(String path) =>
+  /// Rewrites `localhost`/`127.0.0.1` in storage URLs to the host of
+  /// [baseUrl]. The Android emulator reaches the host machine via 10.0.2.2,
+  /// so presigned MinIO URLs that point at the host's localhost otherwise
+  /// resolve to the emulator itself and fail to load.
+  String? reachableUrl(String? url) {
+    if (url == null || url.isEmpty) return url;
+    final uri = Uri.tryParse(url);
+    if (uri == null) return url;
+    if (uri.host != 'localhost' && uri.host != '127.0.0.1') return url;
+    final base = Uri.tryParse(baseUrl);
+    if (base == null || base.host.isEmpty) return url;
+    return uri.replace(host: base.host, port: uri.port).toString();
+  }
+
+  Future<dynamic> get(String path) async =>
       _send('GET', path, headers: await _headers());
 
-  Future<dynamic> post(String path, {Object? body}) => _send('POST', path,
+  Future<dynamic> post(String path, {Object? body}) async => _send('POST', path,
       body: body == null ? null : jsonEncode(body), headers: await _headers());
 
-  Future<dynamic> put(String path, {Object? body}) => _send('PUT', path,
+  Future<dynamic> put(String path, {Object? body}) async => _send('PUT', path,
       body: body == null ? null : jsonEncode(body), headers: await _headers());
 
-  Future<dynamic> delete(String path, {Object? body}) => _send('DELETE', path,
-      body: body == null ? null : jsonEncode(body), headers: await _headers());
+  Future<dynamic> delete(String path, {Object? body}) async => _send(
+        'DELETE',
+        path,
+        body: body == null ? null : jsonEncode(body),
+        headers: await _headers(),
+      );
+
+  /// Multipart POST for file uploads (e.g. `POST /books/upload`). Attaches the
+  /// bearer token and decodes/throws like the other calls.
+  Future<dynamic> postMultipart(
+    String path, {
+    required Map<String, String> fields,
+    required List<http.MultipartFile> files,
+  }) async {
+    final uri = Uri.parse('$baseUrl$path');
+    final req = http.MultipartRequest('POST', uri);
+    req.fields.addAll(fields);
+    req.files.addAll(files);
+    req.headers['Accept'] = 'application/json';
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('auth_token');
+    if (token != null && token.isNotEmpty) {
+      req.headers['Authorization'] = 'Bearer $token';
+    }
+    final streamed = await req.send();
+    final res = await http.Response.fromStream(streamed);
+
+    dynamic decoded;
+    if (res.body.isNotEmpty) {
+      try {
+        decoded = jsonDecode(res.body);
+      } catch (_) {
+        decoded = res.body;
+      }
+    }
+    if (res.statusCode >= 400) {
+      var detail = decoded is Map ? decoded['detail'] : decoded;
+      if (detail is String && detail.isNotEmpty) {
+        throw ApiException(res.statusCode, detail);
+      }
+      throw ApiException(res.statusCode, 'Request failed (${res.statusCode})');
+    }
+    return decoded;
+  }
 
   Future<dynamic> _send(
     String method,

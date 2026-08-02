@@ -10,16 +10,67 @@ class BooksService {
   final ApiClient api;
   BooksService({ApiClient? api}) : api = api ?? ApiClient();
 
+  /// Genre choices for the upload form, matching the web's list.
+  static const List<String> genres = [
+    'Fiction', 'Literary Fiction', 'Classics', 'Contemporary', 'Romance',
+    'Fantasy', 'Science Fiction', 'Dystopian', 'Mystery', 'Crime', 'Thriller',
+    'Suspense', 'Horror', 'Gothic', 'Historical Fiction', 'Adventure',
+    'Western', 'Young Adult', 'New Adult', "Children's", 'Middle Grade',
+    'Picture Book', 'Graphic Novel', 'Comics', 'Manga', 'Poetry', 'Drama',
+    'Short Stories', 'Essays', 'Anthology', 'Biography', 'Autobiography',
+    'Memoir', 'Travel', 'Food & Cooking', 'Self-Help', 'Personal Development',
+    'Psychology', 'Philosophy', 'Religion', 'Spirituality', 'Mythology',
+    'Fairy Tales', 'Folklore', 'Satire', 'Humor', 'Science', 'History',
+    'Politics', 'Economics', 'Business', 'Technology', 'Nature', 'True Crime',
+    'Sports', 'Music', 'Art', 'Health & Fitness', 'Education', 'Reference',
+    'Non-Fiction', 'Other',
+  ];
+
+  /// Uploads a PDF file with metadata. Returns the uploaded book payload.
+  Future<Map<String, dynamic>> upload({
+    required String filePath,
+    required String title,
+    required String author,
+    String? genre,
+  }) async {
+    final files = <http.MultipartFile>[
+      await http.MultipartFile.fromPath('file', filePath),
+    ];
+    final data = await api.postMultipart('/books/upload', fields: {
+      'title': title,
+      'author': author,
+      if (genre != null && genre.isNotEmpty) 'genre': genre,
+    }, files: files);
+    return data is Map<String, dynamic> ? data : <String, dynamic>{};
+  }
+
   Future<List<Book>> list() async {
     final data = await api.get('/books/');
     final items = data as List;
-    return items.map((b) => Book.fromJson(b as Map<String, dynamic>)).toList();
+    return items
+        .map((b) => _reachable(Book.fromJson(b as Map<String, dynamic>)))
+        .toList();
   }
 
   Future<Book> get(String id) async {
     final data = await api.get('/books/$id');
-    return Book.fromJson(data as Map<String, dynamic>);
+    return _reachable(Book.fromJson(data as Map<String, dynamic>));
   }
+
+  Book _reachable(Book b) => Book(
+        id: b.id,
+        title: b.title,
+        author: b.author,
+        genre: b.genre,
+        coverUrl: api.reachableUrl(b.coverUrl),
+        pdfUrl: api.reachableUrl(b.pdfUrl),
+        structuredTextUrl: api.reachableUrl(b.structuredTextUrl),
+        extractionStatus: b.extractionStatus,
+        reflowConfidence: b.reflowConfidence,
+        isScanned: b.isScanned,
+        progress: b.progress,
+        createdAt: b.createdAt,
+      );
 
   /// Reading position for a book (fraction 0..1 across the whole document).
   Future<double> progress(String bookId) async {

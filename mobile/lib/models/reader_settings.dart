@@ -2,9 +2,38 @@ import '../theme/reader_atmosphere.dart';
 
 /// The reader's tunable preferences, matching the "Appearance" panel and the
 /// backend `/settings/` contract.
-enum ReaderFont { literata, grotesk, system }
-
 enum ReaderMode { scroll, paginated }
+
+/// The fifteen type families offered in the reader, matching the web reader's
+/// font options and the backend VALID_FONTS ids. [googleFamily] is the
+/// runtime-loadable Google Fonts family name.
+enum ReaderFont {
+  serif('serif', 'Serif', 'Source Serif 4'),
+  sans('sans', 'Sans', 'Inter'),
+  dyslexic('dyslexic', 'Dyslexic', 'OpenDyslexic'),
+  lora('lora', 'Lora', 'Lora'),
+  merriweather('merriweather', 'Merriweather', 'Merriweather'),
+  garamond('garamond', 'Garamond', 'EB Garamond'),
+  roboto('roboto', 'Roboto', 'Roboto'),
+  opensans('opensans', 'Open Sans', 'Open Sans'),
+  atkinson('atkinson', 'Atkinson', 'Atkinson Hyperlegible'),
+  playfair('playfair', 'Playfair', 'Playfair Display'),
+  lato('lato', 'Lato', 'Lato'),
+  poppins('poppins', 'Poppins', 'Poppins'),
+  nunito('nunito', 'Nunito', 'Nunito'),
+  ptserif('ptserif', 'PT Serif', 'PT Serif'),
+  crimson('crimson', 'Crimson', 'Crimson Pro');
+
+  final String apiId;
+  final String label;
+  final String googleFamily;
+  const ReaderFont(this.apiId, this.label, this.googleFamily);
+
+  static ReaderFont fromApi(String? id) => values.firstWhere(
+        (f) => f.apiId == id,
+        orElse: () => ReaderFont.serif,
+      );
+}
 
 /// Three line-height steps offered in the Appearance panel.
 enum LineHeightLevel {
@@ -31,7 +60,7 @@ enum MarginLevel {
 class ReaderSettings {
   ReadingAtmosphere atmosphere;
   ReaderFont font;
-  double fontSize; // 12..32
+  double fontSize; // 14..32
   LineHeightLevel lineHeight;
   MarginLevel margins;
   ReaderMode mode;
@@ -47,7 +76,7 @@ class ReaderSettings {
 
   factory ReaderSettings.defaults() => ReaderSettings(
         atmosphere: ReadingAtmosphere.sepia,
-        font: ReaderFont.literata,
+        font: ReaderFont.serif,
         fontSize: 18,
         lineHeight: LineHeightLevel.cozy,
         margins: MarginLevel.medium,
@@ -72,21 +101,13 @@ class ReaderSettings {
       );
 
   /// Actual pixel value of the reading font based on the chosen family.
-  String get fontFamily => switch (font) {
-        ReaderFont.literata => 'Literata',
-        ReaderFont.grotesk => 'HankenGrotesk',
-        ReaderFont.system => 'Roboto',
-      };
+  String get fontFamily => font.googleFamily;
 
   /// Maps the local settings onto the backend `/settings/` payload so reading
   /// preferences sync across devices.
   Map<String, dynamic> toApi() => {
         'theme': atmosphere.apiId,
-        'font_family': switch (font) {
-          ReaderFont.literata => 'serif',
-          ReaderFont.grotesk => 'sans',
-          ReaderFont.system => 'roboto',
-        },
+        'font_family': font.apiId,
         'font_size': fontSize.round(),
         'line_spacing': lineHeight.value,
         'margins': switch (margins) {
@@ -98,22 +119,18 @@ class ReaderSettings {
       };
 
   factory ReaderSettings.fromApi(Map<String, dynamic> json) => ReaderSettings(
-        atmosphere: switch (json['theme']) {
-          'sepia' => ReadingAtmosphere.sepia,
-          'night' => ReadingAtmosphere.night,
-          'dark' => ReadingAtmosphere.gray,
-          _ => ReadingAtmosphere.day,
-        },
-        font: switch (json['font_family']) {
-          'sans' => ReaderFont.grotesk,
-          'roboto' => ReaderFont.system,
-          _ => ReaderFont.literata,
-        },
+        atmosphere: ReadingAtmosphere.fromId(
+          AtmosphereId.values.firstWhere(
+            (a) => a.name == json['theme'],
+            orElse: () => AtmosphereId.sepia,
+          ),
+        ),
+        font: ReaderFont.fromApi(json['font_family'] as String?),
         fontSize: ((json['font_size'] as num?)?.toDouble() ?? 18)
-            .clamp(12, 32),
+            .clamp(14, 32),
         lineHeight: switch ((json['line_spacing'] as num?)?.toDouble()) {
-          <= 1.5 => LineHeightLevel.snug,
-          >= 1.9 => LineHeightLevel.airy,
+          final v when v != null && v <= 1.5 => LineHeightLevel.snug,
+          final v when v != null && v >= 1.9 => LineHeightLevel.airy,
           _ => LineHeightLevel.cozy,
         },
         margins: switch (json['margins']) {

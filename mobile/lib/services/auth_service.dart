@@ -39,4 +39,34 @@ class AuthService {
 
   Future<bool> hasSession() async =>
       (await api.getToken())?.isNotEmpty ?? false;
+
+  Future<Map<String, dynamic>> forgotPassword(String email) async {
+    final data = await api
+        .post('/auth/forgot-password', body: {'email': email});
+    return data as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> resetPassword({
+    required String email,
+    required String token,
+    required String password,
+  }) async {
+    final data = await api.post('/auth/reset-password', body: {
+      'email': email,
+      'token': token,
+      'password': password,
+    });
+    return data as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> verifyEmail(String email, String code) async {
+    final data = await api
+        .post('/auth/verify-email', body: {'email': email, 'code': code});
+    return data as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> resendVerification(String email) async {
+    final data = await api.post('/auth/resend-verification', body: {'email': email});
+    return data as Map<String, dynamic>;
+  }
 }

@@ -1,18 +1,26 @@
 import 'package:flutter/material.dart';
 
 import '../models/book.dart';
+import '../models/shelf.dart';
 import '../services/books_service.dart';
+import '../services/shelves_service.dart';
 import '../theme/serene_theme.dart';
 import '../theme/serene_tokens.dart';
 import '../widgets/app_header.dart';
-import '../widgets/book_card.dart';
 import '../widgets/book_cover.dart';
+import '../widgets/shelf_cover.dart';
+import '../widgets/upload_flow.dart';
 
-/// The Cloud Library: "Recently Read" horizontal carousel + "My Shelves"
-/// adaptive grid, topped by the AnyShelf brand bar and a cloud-sync FAB.
+/// The Library (home) destination — mirrors the web home page: a "Continue
+/// Reading" carousel, a "My Shelves" grid, then a "Recently Added" list.
 class LibraryScreen extends StatefulWidget {
   final ValueChanged<Book> onOpenBook;
-  const LibraryScreen({super.key, required this.onOpenBook});
+  final VoidCallback onGoToShelves;
+  const LibraryScreen({
+    super.key,
+    required this.onOpenBook,
+    required this.onGoToShelves,
+  });
 
   @override
   State<LibraryScreen> createState() => _LibraryScreenState();
@@ -20,13 +28,12 @@ class LibraryScreen extends StatefulWidget {
 
 class _LibraryScreenState extends State<LibraryScreen> {
   final _booksService = BooksService();
+  final _shelvesService = ShelvesService();
   List<Book> _books = [];
+  List<Shelf> _shelves = [];
   bool _loading = true;
-  String? _error;
 
-  List<Book> get _recentlyRead =>
-      _books.where((b) => (b.progress ?? 0) > 0).toList()
-        ..sort((a, b) => (b.progress ?? 0).compareTo(a.progress ?? 0));
+  static const double _completedFraction = 0.995;
 
   @override
   void initState() {
@@ -35,10 +42,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+    setState(() => _loading = true);
     try {
       final books = await _booksService.list();
       final progress = <String, double>{};
@@ -47,34 +51,83 @@ class _LibraryScreenState extends State<LibraryScreen> {
           progress[b.id] = await _booksService.progress(b.id);
         } catch (_) {}
       }));
+      final shelves = await _shelvesService.list();
       if (!mounted) return;
       setState(() {
         _books = [
           for (final b in books)
             b.copyWith(progress: progress[b.id] ?? b.progress),
         ];
+        _shelves = shelves;
         _loading = false;
       });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+    }
+  }
+
+  bool _isCompleted(Book b) => (b.progress ?? 0) >= _completedFraction;
+
+  List<Book> get _continueReading {
+    final inProgress = _books
+        .where((b) => !_isCompleted(b) && (b.progress ?? 0) > 0)
+        .toList()
+      ..sort((a, b) => (b.progress ?? 0).compareTo(a.progress ?? 0));
+    if (inProgress.isNotEmpty) return inProgress;
+    return _books.where((b) => !_isCompleted(b)).toList();
+  }
+
+  List<Book> get _recentlyAdded {
+    final list = [..._books]
+      ..sort((a, b) =>
+          (b.createdAt?.millisecondsSinceEpoch ?? 0)
+              .compareTo(a.createdAt?.millisecondsSinceEpoch ?? 0));
+    return list.take(3).toList();
+  }
+
+  Future<void> _deleteBook(Book book) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Delete "${book.title}"?'),
+        content: const Text('This cannot be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await _booksService.api.delete('/books/${book.id}');
+      await _load();
     } catch (e) {
       if (!mounted) return;
-      setState(() {
-        _error = '$e';
-        _loading = false;
-      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Delete failed: $e')),
+      );
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).extension<SereneTheme>()!.colors;
-    final isTablet = MediaQuery.sizeOf(context).width >= SereneLayout.tabletBreakpoint;
+    final isTablet =
+        MediaQuery.sizeOf(context).width >= SereneLayout.tabletBreakpoint;
 
     return Scaffold(
       floatingActionButton: FloatingActionButton(
-        onPressed: () => _showAddSheet(context),
+        onPressed: () => UploadFlow.showAddSheet(context, onUploaded: _load),
         backgroundColor: colors.primaryContainer,
         foregroundColor: colors.onPrimaryContainer,
-        shape: RoundedRectangleBorder(borderRadius: SereneShape.xl),
+        shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(SereneShape.xl)),
         child: const Icon(Icons.add, size: 28),
       ),
       floatingActionButtonLocation: isTablet
@@ -90,144 +143,129 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Widget _buildBody() {
+    final colors = Theme.of(context).extension<SereneTheme>()!.colors;
     if (_loading) {
       return const Center(child: CircularProgressIndicator());
     }
-    if (_error != null) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.cloud_off, size: 40),
-              const SizedBox(height: 12),
-              const Text('Couldn\'t reach your library'),
-              const SizedBox(height: 12),
-              FilledButton(onPressed: _load, child: const Text('Retry')),
-            ],
-          ),
-        ),
-      );
-    }
 
-    final recently = _recentlyRead;
-    final columns = _columnCount(MediaQuery.sizeOf(context).width);
+    final continuing = _continueReading;
+    final recent = _recentlyAdded;
 
     return RefreshIndicator(
       onRefresh: _load,
       child: CustomScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
         slivers: [
-          const SliverPadding(padding: EdgeInsets.only(top: 24)),
-          if (recently.isNotEmpty) ...[
-            SliverToBoxAdapter(
-              child: _SectionLabel('Recently Read'),
-            ),
-            SliverToBoxAdapter(
-              child: _RecentlyReadRow(books: recently, onOpen: widget.onOpenBook),
-            ),
-            const SliverPadding(padding: EdgeInsets.only(top: 40)),
-          ],
-          SliverToBoxAdapter(
-            child: _SectionLabel(
-              'My Shelves',
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    onPressed: () {},
-                    icon: Icon(Icons.grid_view, color: colors.primary, size: 22),
-                    tooltip: 'Grid view',
-                  ),
-                  IconButton(
-                    onPressed: () {},
-                    icon: Icon(Icons.view_list,
-                        color: colors.onSurfaceVariant, size: 22),
-                    tooltip: 'List view',
-                  ),
-                ],
-              ),
-            ),
-          ),
           SliverPadding(
-            padding: const EdgeInsets.fromLTRB(24, 0, 24, 96),
-            sliver: SliverGrid(
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: columns,
-                mainAxisSpacing: 32,
-                crossAxisSpacing: 16,
-                childAspectRatio: 2 / 3 + 0.34,
-              ),
-              delegate: SliverChildBuilderDelegate(
-                (context, index) => BookCard(
-                  book: _books[index],
-                  progress: _books[index].progress,
-                  onTap: () => widget.onOpenBook(_books[index]),
-                ),
-                childCount: _books.length,
-              ),
+            padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
+            sliver: SliverToBoxAdapter(
+              child: Text('Library',
+                  style: SereneType.headlineMobile.copyWith(color: colors.onSurface)),
             ),
           ),
-          if (_books.isEmpty)
-            const SliverFillRemaining(
+          if (continuing.isNotEmpty) ...[
+            const SliverPadding(padding: EdgeInsets.only(top: 24)),
+            SliverToBoxAdapter(
+              child: _SectionLabel('Continue Reading'),
+            ),
+            SliverToBoxAdapter(
+              child: _ContinueReadingRow(
+                books: continuing,
+                onOpen: widget.onOpenBook,
+              ),
+            ),
+          ],
+          if (_shelves.isNotEmpty) ...[
+            const SliverPadding(padding: EdgeInsets.only(top: 40)),
+            SliverToBoxAdapter(
+              child: _SectionLabel(
+                'My Shelves',
+                trailing: TextButton(
+                  onPressed: widget.onGoToShelves,
+                  child: const Text('See all'),
+                ),
+              ),
+            ),
+            SliverPadding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              sliver: SliverGrid(
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 2,
+                  mainAxisSpacing: 16,
+                  crossAxisSpacing: 16,
+                  childAspectRatio: 1.15,
+                ),
+                delegate: SliverChildBuilderDelegate(
+                  (context, index) {
+                    final shelf = _shelves[index];
+                    return GestureDetector(
+                      onTap: widget.onGoToShelves,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: ShelfCover(
+                                shelf: shelf, height: double.infinity),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(shelf.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: SereneType.labelMd
+                                  .copyWith(color: colors.onSurface)),
+                        ],
+                      ),
+                    );
+                  },
+                  childCount: _shelves.length,
+                ),
+              ),
+            ),
+          ],
+          const SliverPadding(padding: EdgeInsets.only(top: 40)),
+          SliverToBoxAdapter(
+            child: _SectionLabel('Recently Added'),
+          ),
+          if (recent.isEmpty)
+            SliverFillRemaining(
               hasScrollBody: false,
-              child: _EmptyLibrary(),
+              child: Padding(
+                padding: const EdgeInsets.all(32),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.auto_stories,
+                        size: 56, color: colors.outlineVariant),
+                    const SizedBox(height: 16),
+                    Text('Your library is empty',
+                        style: SereneType.title.copyWith(color: colors.onSurface)),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Upload a PDF to get started.',
+                      textAlign: TextAlign.center,
+                      style: SereneType.uiBody
+                          .copyWith(color: colors.onSurfaceVariant),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          else
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(24, 0, 24, 96),
+              sliver: SliverList(
+                delegate: SliverChildBuilderDelegate(
+                  (context, index) => _RecentlyAddedTile(
+                    book: recent[index],
+                    onTap: () => widget.onOpenBook(recent[index]),
+                    onDelete: () => _deleteBook(recent[index]),
+                  ),
+                  childCount: recent.length,
+                ),
+              ),
             ),
         ],
       ),
-    );
-  }
-
-  int _columnCount(double width) {
-    if (width >= 1200) return 5;
-    if (width >= 900) return 4;
-    if (width >= 600) return 3;
-    return 2;
-  }
-
-  void _showAddSheet(BuildContext context) {
-    final colors = Theme.of(context).extension<SereneTheme>()!.colors;
-    showModalBottomSheet<void>(
-      context: context,
-      builder: (context) => Padding(
-        padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Add to your library',
-                style: SereneType.headlineMobile.copyWith(color: colors.onSurface)),
-            const SizedBox(height: 8),
-            Text(
-              'Upload a PDF from your device, Google Drive, Dropbox, or a URL.',
-              style: SereneType.uiBody.copyWith(color: colors.onSurfaceVariant),
-            ),
-            const SizedBox(height: 20),
-            ListTile(
-              leading: Icon(Icons.upload_file, color: colors.primary),
-              title: const Text('Upload PDF'),
-              subtitle: const Text('From this device'),
-              shape: RoundedRectangleBorder(borderRadius: SereneShape.md),
-              onTap: () => _notYet(context),
-            ),
-            ListTile(
-              leading: Icon(Icons.link, color: colors.primary),
-              title: const Text('Import from URL'),
-              subtitle: const Text('Fetch a PDF from a link'),
-              shape: RoundedRectangleBorder(borderRadius: SereneShape.md),
-              onTap: () => _notYet(context),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _notYet(BuildContext context) {
-    Navigator.pop(context);
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Upload is coming soon.')),
     );
   }
 }
@@ -257,10 +295,10 @@ class _SectionLabel extends StatelessWidget {
   }
 }
 
-class _RecentlyReadRow extends StatelessWidget {
+class _ContinueReadingRow extends StatelessWidget {
   final List<Book> books;
   final ValueChanged<Book> onOpen;
-  const _RecentlyReadRow({required this.books, required this.onOpen});
+  const _ContinueReadingRow({required this.books, required this.onOpen});
 
   @override
   Widget build(BuildContext context) {
@@ -332,27 +370,75 @@ class _RecentlyReadRow extends StatelessWidget {
   }
 }
 
-class _EmptyLibrary extends StatelessWidget {
-  const _EmptyLibrary();
+class _RecentlyAddedTile extends StatelessWidget {
+  final Book book;
+  final VoidCallback onTap;
+  final VoidCallback onDelete;
+  const _RecentlyAddedTile({
+    required this.book,
+    required this.onTap,
+    required this.onDelete,
+  });
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).extension<SereneTheme>()!.colors;
-    return Center(
+    final progress = (book.progress ?? 0).clamp(0.0, 1.0);
+    return InkWell(
+      onTap: onTap,
       child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Row(
           children: [
-            Icon(Icons.auto_stories, size: 56, color: colors.outlineVariant),
-            const SizedBox(height: 16),
-            Text('Your library is empty',
-                style: SereneType.title.copyWith(color: colors.onSurface)),
-            const SizedBox(height: 8),
-            Text(
-              'Upload your first PDF to start your cloud library.',
-              textAlign: TextAlign.center,
-              style: SereneType.uiBody.copyWith(color: colors.onSurfaceVariant),
+            SizedBox(
+              width: 48,
+              height: 64,
+              child: BookCover(book: book, progress: book.progress, borderRadius: 8),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(book.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: SereneType.labelMd.copyWith(color: colors.onSurface)),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Text(
+                        book.extractionStatus == 'failed'
+                            ? 'Extraction failed'
+                            : '${(progress * 100).round()}%',
+                        style: SereneType.labelSm
+                            .copyWith(color: colors.onSurfaceVariant),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: ClipRRect(
+                          borderRadius: SereneShape.fullPill,
+                          child: Container(
+                            height: 6,
+                            color: colors.surfaceVariant,
+                            child: FractionallySizedBox(
+                              alignment: Alignment.centerLeft,
+                              widthFactor: progress,
+                              child: ColoredBox(color: colors.primary),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            IconButton(
+              onPressed: onDelete,
+              icon: const Icon(Icons.delete_outline),
+              color: colors.onSurfaceVariant,
+              tooltip: 'Delete book',
             ),
           ],
         ),

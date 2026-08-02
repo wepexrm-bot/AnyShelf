@@ -1,27 +1,55 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
 import 'screens/auth_screen.dart';
 import 'services/auth_service.dart';
+import 'services/ui_mode_controller.dart';
 import 'theme/serene_theme.dart';
 import 'theme/serene_tokens.dart';
 import 'widgets/app_shell.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
   runApp(const CloudReadApp());
 }
 
-class CloudReadApp extends StatelessWidget {
+class CloudReadApp extends StatefulWidget {
   const CloudReadApp({super.key});
 
   @override
+  State<CloudReadApp> createState() => _CloudReadAppState();
+}
+
+class _CloudReadAppState extends State<CloudReadApp> {
+  final _uiMode = UiModeController();
+
+  @override
+  void initState() {
+    super.initState();
+    _uiMode.load();
+  }
+
+  @override
+  void dispose() {
+    _uiMode.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'AnyShelf',
-      debugShowCheckedModeBanner: false,
-      theme: sereneTheme(SereneColorScheme.day),
-      darkTheme: sereneTheme(SereneColorScheme.night),
-      themeMode: ThemeMode.light,
-      home: const _AuthGate(),
+    return ChangeNotifierProvider.value(
+      value: _uiMode,
+      child: ListenableBuilder(
+        listenable: _uiMode,
+        builder: (context, _) => MaterialApp(
+          title: 'AnyShelf',
+          debugShowCheckedModeBanner: false,
+          theme: sereneTheme(SereneColorScheme.day),
+          darkTheme: sereneTheme(SereneColorScheme.night),
+          themeMode: _uiMode.mode,
+          home: const _AuthGate(),
+        ),
+      ),
     );
   }
 }

@@ -33,11 +33,20 @@ class _AuthScreenState extends State<AuthScreen> {
     setState(() => _busy = true);
     try {
       if (_signup) {
-        await _auth.register(
+        final result = await _auth.register(
           email: email,
           password: password,
           displayName: _nameCtl.text.trim(),
         );
+        final verified = result['is_verified'] == true;
+        if (!verified) {
+          if (!mounted) return;
+          final ok = await _verifyEmailFlow(email);
+          if (!ok) {
+            setState(() => _busy = false);
+            return;
+          }
+        }
       } else {
         await _auth.login(email, password);
       }
@@ -52,6 +61,97 @@ class _AuthScreenState extends State<AuthScreen> {
       _toast('Something went wrong. Check your connection and try again.');
     } finally {
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<bool> _verifyEmailFlow(String email) async {
+    final verified = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _VerifyEmailDialog(email: email, auth: _auth),
+    );
+    return verified ?? false;
+  }
+
+  Future<void> _forgotPasswordFlow() async {
+    final emailCtl = TextEditingController(text: _emailCtl.text.trim());
+    final sent = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Forgot password'),
+        content: TextField(
+          controller: emailCtl,
+          keyboardType: TextInputType.emailAddress,
+          decoration: const InputDecoration(labelText: 'Email'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Send reset link'),
+          ),
+        ],
+      ),
+    );
+    if (sent != true) return;
+    try {
+      await _auth.forgotPassword(emailCtl.text.trim());
+      _toast('If that email exists, a reset link was sent.');
+    } on ApiException catch (e) {
+      _toast(e.message);
+    }
+    if (!mounted) return;
+    await _resetPasswordFlow(emailCtl.text.trim());
+  }
+
+  Future<void> _resetPasswordFlow(String email) async {
+    final tokenCtl = TextEditingController();
+    final passCtl = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Reset password'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: tokenCtl,
+              decoration: const InputDecoration(
+                  labelText: 'Reset token from email'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: passCtl,
+              obscureText: true,
+              decoration: const InputDecoration(labelText: 'New password'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Reset'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await _auth.resetPassword(
+        email: email,
+        token: tokenCtl.text.trim(),
+        password: passCtl.text,
+      );
+      _toast('Password reset. You can sign in now.');
+    } on ApiException catch (e) {
+      _toast(e.message);
     }
   }
 
@@ -154,6 +254,15 @@ class _AuthScreenState extends State<AuthScreen> {
                         : Text(_signup ? 'Create account' : 'Sign in'),
                   ),
                   const SizedBox(height: 16),
+                  if (!_signup)
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: TextButton(
+                        onPressed: _forgotPasswordFlow,
+                        child: const Text('Forgot password?'),
+                      ),
+                    ),
+                  const SizedBox(height: 8),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
@@ -174,6 +283,101 @@ class _AuthScreenState extends State<AuthScreen> {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _VerifyEmailDialog extends StatefulWidget {
+  final String email;
+  final AuthService auth;
+  const _VerifyEmailDialog({required this.email, required this.auth});
+
+  @override
+  State<_VerifyEmailDialog> createState() => _VerifyEmailDialogState();
+}
+
+class _VerifyEmailDialogState extends State<_VerifyEmailDialog> {
+  final _codeCtl = TextEditingController();
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _codeCtl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _verify() async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await widget.auth.verifyEmail(widget.email, _codeCtl.text.trim());
+      if (!mounted) return;
+      Navigator.pop(context, true);
+    } on ApiException catch (e) {
+      setState(() {
+        _busy = false;
+        _error = e.message;
+      });
+    }
+  }
+
+  Future<void> _resend() async {
+    await widget.auth.resendVerification(widget.email);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('Verification code sent.')));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).extension<SereneTheme>()!.colors;
+    return AlertDialog(
+      title: const Text('Verify your email'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            'Enter the 6-digit code sent to ${widget.email}.',
+            style: SereneType.uiBody.copyWith(color: colors.onSurfaceVariant),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _codeCtl,
+            autofocus: true,
+            keyboardType: TextInputType.number,
+            maxLength: 6,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 24, letterSpacing: 8),
+            onSubmitted: (_) => _verify(),
+            decoration: const InputDecoration(labelText: 'Code'),
+          ),
+          if (_error != null) ...[
+            const SizedBox(height: 4),
+            Text(_error!,
+                style: SereneType.labelSm.copyWith(color: colors.error)),
+          ],
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Cancel'),
+        ),
+        TextButton(onPressed: _resend, child: const Text('Resend code')),
+        FilledButton(
+          onPressed: _busy ? null : _verify,
+          child: _busy
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text('Verify'),
+        ),
+      ],
     );
   }
 }

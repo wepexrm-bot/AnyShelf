@@ -11,6 +11,7 @@ class Book {
   final double? reflowConfidence;
   final bool isScanned;
   final double? progress; // current reading position (fraction 0..1)
+  final DateTime? createdAt;
 
   const Book({
     required this.id,
@@ -24,6 +25,7 @@ class Book {
     this.reflowConfidence,
     this.isScanned = false,
     this.progress,
+    this.createdAt,
   });
 
   /// Reflow mode is offered when the extraction pipeline judged the text
@@ -44,6 +46,9 @@ class Book {
         reflowConfidence: (json['reflow_confidence'] as num?)?.toDouble(),
         isScanned: json['is_scanned'] as bool? ?? false,
         progress: (json['progress'] as num?)?.toDouble(),
+        createdAt: json['created_at'] != null
+            ? DateTime.tryParse(json['created_at'] as String)
+            : null,
       );
 
   Book copyWith({double? progress}) => Book(
@@ -58,6 +63,7 @@ class Book {
         reflowConfidence: reflowConfidence,
         isScanned: isScanned,
         progress: progress ?? this.progress,
+        createdAt: createdAt,
       );
 }
 

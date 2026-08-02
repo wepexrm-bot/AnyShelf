@@ -11,9 +11,10 @@ dependencies:
     sdk: flutter
   http: ^1.2.2
   provider: ^6.1.2
-  syncfusion_flutter_pdfviewer: ^26.2.9 # fixed-layout PDF rendering
+  syncfusion_flutter_pdfviewer: ^34.1.33 # fixed-layout PDF rendering
   shared_preferences: ^2.3.2 # token + small local cache
-
+  google_fonts: ^8.2.1
+  file_selector: ^1.1.0
 dev_dependencies:
   flutter_test:
     sdk: flutter

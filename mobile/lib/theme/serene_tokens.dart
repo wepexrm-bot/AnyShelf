@@ -68,65 +68,65 @@ class SereneColorScheme {
   });
 
   static const SereneColorScheme day = SereneColorScheme(
-    surface: Color(0xFFFAF9F8),
-    surfaceDim: Color(0xFFDADAD9),
-    surfaceBright: Color(0xFFFAF9F8),
+    surface: Color(0xFFFCF9F8),
+    surfaceDim: Color(0xFFDCD9D9),
+    surfaceBright: Color(0xFFFCF9F8),
     surfaceContainerLowest: Color(0xFFFFFFFF),
-    surfaceContainerLow: Color(0xFFF4F3F2),
-    surfaceContainer: Color(0xFFEEEEED),
-    surfaceContainerHigh: Color(0xFFE9E8E7),
-    surfaceContainerHighest: Color(0xFFE3E2E1),
-    onSurface: Color(0xFF1A1C1C),
-    onSurfaceVariant: Color(0xFF404847),
-    inverseSurface: Color(0xFF2F3130),
-    inverseOnSurface: Color(0xFFF1F0F0),
-    outline: Color(0xFF707977),
-    outlineVariant: Color(0xFFBFC8C6),
-    surfaceTint: Color(0xFF316763),
-    primary: Color(0xFF003633),
+    surfaceContainerLow: Color(0xFFF6F3F2),
+    surfaceContainer: Color(0xFFF0EDED),
+    surfaceContainerHigh: Color(0xFFEAE7E7),
+    surfaceContainerHighest: Color(0xFFE4E2E1),
+    onSurface: Color(0xFF1B1C1C),
+    onSurfaceVariant: Color(0xFF42493E),
+    inverseSurface: Color(0xFF303030),
+    inverseOnSurface: Color(0xFFF3F0EF),
+    outline: Color(0xFF72796E),
+    outlineVariant: Color(0xFFC2C9BB),
+    surfaceTint: Color(0xFF3B6934),
+    primary: Color(0xFF154212),
     onPrimary: Color(0xFFFFFFFF),
-    primaryContainer: Color(0xFF134E4A),
-    onPrimaryContainer: Color(0xFF87BEB8),
-    inversePrimary: Color(0xFF9AD1CB),
+    primaryContainer: Color(0xFF2D5A27),
+    onPrimaryContainer: Color(0xFF9DD090),
+    inversePrimary: Color(0xFFA1D494),
     error: Color(0xFFBA1A1A),
     onError: Color(0xFFFFFFFF),
     errorContainer: Color(0xFFFFDAD6),
     onErrorContainer: Color(0xFF93000A),
-    background: Color(0xFFFAF9F8),
-    onBackground: Color(0xFF1A1C1C),
-    surfaceVariant: Color(0xFFE3E2E1),
-    accentTeal: Color(0xFF134E4A),
+    background: Color(0xFFFCF9F8),
+    onBackground: Color(0xFF1B1C1C),
+    surfaceVariant: Color(0xFFE4E2E1),
+    accentTeal: Color(0xFF154212),
   );
 
   static const SereneColorScheme night = SereneColorScheme(
-    surface: Color(0xFF131313),
-    surfaceDim: Color(0xFF131313),
-    surfaceBright: Color(0xFF393939),
-    surfaceContainerLowest: Color(0xFF0E0E0E),
-    surfaceContainerLow: Color(0xFF1C1B1B),
-    surfaceContainer: Color(0xFF201F1F),
-    surfaceContainerHigh: Color(0xFF2A2A2A),
-    surfaceContainerHighest: Color(0xFF353534),
-    onSurface: Color(0xFFE5E2E1),
-    onSurfaceVariant: Color(0xFFC3C6D0),
-    inverseSurface: Color(0xFFE5E2E1),
-    inverseOnSurface: Color(0xFF313030),
-    outline: Color(0xFF8D9199),
-    outlineVariant: Color(0xFF43474F),
-    surfaceTint: Color(0xFFA9C8FB),
-    primary: Color(0xFFD3E2FF),
-    onPrimary: Color(0xFF0A315B),
-    primaryContainer: Color(0xFFA8C7FA),
-    onPrimaryContainer: Color(0xFF33537F),
-    inversePrimary: Color(0xFF405F8C),
+    surface: Color(0xFF121412),
+    surfaceDim: Color(0xFF121412),
+    surfaceBright: Color(0xFF383A37),
+    surfaceContainerLowest: Color(0xFF0D0F0D),
+    surfaceContainerLow: Color(0xFF1A1C1A),
+    surfaceContainer: Color(0xFF1E201E),
+    surfaceContainerHigh: Color(0xFF292A28),
+    surfaceContainerHighest: Color(0xFF333533),
+    onSurface: Color(0xFFE2E3DF),
+    onSurfaceVariant: Color(0xFFC2C9BB),
+    inverseSurface: Color(0xFFE2E3DF),
+    inverseOnSurface: Color(0xFF2F312E),
+    outline: Color(0xFF8C9387),
+    outlineVariant: Color(0xFF42493E),
+    surfaceTint: Color(0xFFA1D494),
+    primary: Color(0xFFA1D494),
+    onPrimary: Color(0xFF0A3909),
+    primaryContainer: Color(0xFF2D5A27),
+    onPrimaryContainer: Color(0xFF9DD090),
+    inversePrimary: Color(0xFF3B6934),
     error: Color(0xFFFFB4AB),
     onError: Color(0xFF690005),
     errorContainer: Color(0xFF93000A),
     onErrorContainer: Color(0xFFFFDAD6),
-    background: Color(0xFF131313),
-    onBackground: Color(0xFFE5E2E1),
-    surfaceVariant: Color(0xFF353534),
-    accentTeal: Color(0xFF9AD1CB),
+    background: Color(0xFF121412),
+    onBackground: Color(0xFFE2E3DF),
+    surfaceVariant: Color(0xFF333533),
+    accentTeal: Color(0xFFA1D494),
   );
 
   SereneColorScheme copyWith({Color? accentTeal}) => SereneColorScheme(
@@ -185,11 +185,13 @@ abstract final class SereneSpacing {
   static const double marginTablet = 48;
 }
 
-/// Typography: Literata for content/headings ("consuming"), Hanken Grotesk
-/// for app chrome ("managing"). Reading body uses a generous 1.7x line height.
+/// Typography: Playfair Display for display/headings, Inter for app chrome,
+/// Source Serif 4 for long-form reading — matching the web design system.
+/// Reading body uses a generous 1.7x line height.
 abstract final class SereneType {
-  static const String displayFamily = 'Literata';
-  static const String uiFamily = 'HankenGrotesk';
+  static const String displayFamily = 'Playfair Display';
+  static const String uiFamily = 'Inter';
+  static const String bodyFamily = 'Source Serif 4';
 
   static const TextStyle displayLg = TextStyle(
     fontFamily: displayFamily,
@@ -221,7 +223,7 @@ abstract final class SereneType {
   );
 
   static const TextStyle readingBody = TextStyle(
-    fontFamily: displayFamily,
+    fontFamily: bodyFamily,
     fontSize: 18,
     height: 32 / 18,
     fontWeight: FontWeight.w400,

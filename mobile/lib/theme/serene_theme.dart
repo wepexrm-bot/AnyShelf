@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 import 'serene_tokens.dart';
 
@@ -108,14 +109,22 @@ ThemeData sereneTheme(SereneColorScheme c) {
   );
 
   final textTheme = base.textTheme.copyWith(
-    displayLarge: SereneType.displayLg.copyWith(color: c.onBackground),
-    headlineLarge: SereneType.headlineLg.copyWith(color: c.onBackground),
-    headlineMedium: SereneType.headlineMobile.copyWith(color: c.onBackground),
-    titleLarge: SereneType.title.copyWith(color: c.onSurface),
-    bodyLarge: SereneType.readingBody.copyWith(color: c.onBackground),
-    bodyMedium: SereneType.uiBody.copyWith(color: c.onBackground),
-    labelLarge: SereneType.labelMd.copyWith(color: c.onSurface),
-    labelMedium: SereneType.labelSm.copyWith(color: c.onSurfaceVariant),
+    displayLarge: GoogleFonts.playfairDisplay(
+        textStyle: SereneType.displayLg.copyWith(color: c.onBackground)),
+    headlineLarge: GoogleFonts.playfairDisplay(
+        textStyle: SereneType.headlineLg.copyWith(color: c.onBackground)),
+    headlineMedium: GoogleFonts.playfairDisplay(
+        textStyle: SereneType.headlineMobile.copyWith(color: c.onBackground)),
+    titleLarge: GoogleFonts.playfairDisplay(
+        textStyle: SereneType.title.copyWith(color: c.onSurface)),
+    bodyLarge: GoogleFonts.sourceSerif4(
+        textStyle: SereneType.readingBody.copyWith(color: c.onBackground)),
+    bodyMedium: GoogleFonts.inter(
+        textStyle: SereneType.uiBody.copyWith(color: c.onBackground)),
+    labelLarge: GoogleFonts.inter(
+        textStyle: SereneType.labelMd.copyWith(color: c.onSurface)),
+    labelMedium: GoogleFonts.inter(
+        textStyle: SereneType.labelSm.copyWith(color: c.onSurfaceVariant)),
   );
 
   return base.copyWith(
@@ -143,11 +152,11 @@ ThemeData sereneTheme(SereneColorScheme c) {
       contentPadding:
           const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       border: OutlineInputBorder(
-        borderRadius: SereneShape.md,
+        borderRadius: BorderRadius.all(SereneShape.md),
         borderSide: BorderSide.none,
       ),
       enabledBorder: OutlineInputBorder(
-        borderRadius: SereneShape.md,
+        borderRadius: BorderRadius.all(SereneShape.md),
         borderSide: BorderSide.none,
       ),
       focusedBorder: UnderlineInputBorder(
@@ -203,14 +212,12 @@ ThemeData sereneTheme(SereneColorScheme c) {
       overlayColor: c.primary.withValues(alpha: 0.12),
       thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 12),
       overlayShape: const RoundSliderOverlayShape(overlayRadius: 20),
-      trackShape: const RoundedRectSliderTrackShape(
-        borderRadius: BorderRadius.all(SereneShape.full),
-      ),
+      trackShape: const RoundedRectSliderTrackShape(),
     ),
     bottomSheetTheme: BottomSheetThemeData(
       backgroundColor: c.surfaceContainerLowest,
       surfaceTintColor: Colors.transparent,
-      shape: SereneShape.sheetTop,
+      shape: RoundedRectangleBorder(borderRadius: SereneShape.sheetTop),
       clipBehavior: Clip.antiAlias,
     ),
     snackBarTheme: SnackBarThemeData(
@@ -218,12 +225,12 @@ ThemeData sereneTheme(SereneColorScheme c) {
       contentTextStyle:
           SereneType.uiBody.copyWith(color: c.inverseOnSurface),
       behavior: SnackBarBehavior.floating,
-      shape: RoundedRectangleBorder(borderRadius: SereneShape.md),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.all(SereneShape.md)),
     ),
     dialogTheme: DialogThemeData(
       backgroundColor: c.surfaceContainerLowest,
       surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(borderRadius: SereneShape.lg),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.all(SereneShape.lg)),
     ),
   );
 }

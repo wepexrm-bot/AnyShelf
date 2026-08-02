@@ -33,7 +33,6 @@ class _ReaderAppearanceSheetState extends State<ReaderAppearanceSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = Theme.of(context).extension<SereneTheme>()!.colors;
     return DraggableScrollableSheet(
       expand: false,
       initialChildSize: 0.92,
@@ -130,22 +129,28 @@ class _ThemeSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = Theme.of(context).extension<SereneTheme>()!.colors;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const _SectionTitle('Theme'),
-        Row(
-          children: [
-            for (final a in ReadingAtmosphere.all)
-              Expanded(
-                child: _ThemeTile(
-                  atmosphere: a,
-                  active: a.id == selected.id,
-                  onTap: () => onSelect(a),
-                ),
-              ),
-          ],
+        GridView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          itemCount: ReadingAtmosphere.all.length,
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 3,
+            crossAxisSpacing: 8,
+            mainAxisSpacing: 12,
+            childAspectRatio: 0.92,
+          ),
+          itemBuilder: (context, i) {
+            final a = ReadingAtmosphere.all[i];
+            return _ThemeTile(
+              atmosphere: a,
+              active: a.id == selected.id,
+              onTap: () => onSelect(a),
+            );
+          },
         ),
       ],
     );
@@ -170,32 +175,33 @@ class _ThemeTile extends StatelessWidget {
       behavior: HitTestBehavior.opaque,
       child: Column(
         children: [
-          AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            width: double.infinity,
-            aspectRatio: 4 / 3,
-            margin: const EdgeInsets.symmetric(horizontal: 4),
-            decoration: BoxDecoration(
-              color: atmosphere.background,
-              borderRadius: SereneShape.md,
-              border: Border.all(
-                color: active ? colors.primary : colors.outlineVariant,
-                width: active ? 2 : 1,
+          Expanded(
+            child: Container(
+              width: double.infinity,
+              decoration: BoxDecoration(
+                color: atmosphere.background,
+                borderRadius: BorderRadius.all(SereneShape.md),
+                border: Border.all(
+                  color: active ? colors.primary : colors.outlineVariant,
+                  width: active ? 2 : 1,
+                ),
+                boxShadow: active
+                    ? [
+                        BoxShadow(
+                          color: colors.primary.withValues(alpha: 0.15),
+                          blurRadius: 8,
+                        ),
+                      ]
+                    : null,
               ),
-              boxShadow: active
-                  ? [
-                      BoxShadow(
-                        color: colors.primary.withValues(alpha: 0.15),
-                        blurRadius: 8,
-                      ),
-                    ]
-                  : null,
+              child: Icon(atmosphere.icon, color: atmosphere.text),
             ),
-            child: Icon(atmosphere.icon, color: atmosphere.text),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           Text(
             atmosphere.label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
             style: SereneType.labelSm.copyWith(
               color: active ? colors.onSurface : colors.onSurfaceVariant,
               fontWeight: active ? FontWeight.w700 : FontWeight.w600,
@@ -219,12 +225,7 @@ class _TypographySection extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const _SectionTitle('Typography'),
-        _Segmented<ReaderFont>(
-          options: const [
-            (ReaderFont.literata, 'Literata'),
-            (ReaderFont.grotesk, 'Grotesk'),
-            (ReaderFont.system, 'System'),
-          ],
+        _FontPicker(
           selected: settings.font,
           onSelect: (f) => onChanged(settings.copyWith(font: f)),
         ),
@@ -235,7 +236,7 @@ class _TypographySection extends StatelessWidget {
             Expanded(
               child: Slider(
                 value: settings.fontSize,
-                min: 12,
+                min: 14,
                 max: 32,
                 onChanged: (v) => onChanged(settings.copyWith(fontSize: v)),
               ),
@@ -299,64 +300,56 @@ class _TypographySection extends StatelessWidget {
   }
 }
 
-class _Segmented<T> extends StatelessWidget {
-  final List<(T, String)> options;
-  final T selected;
-  final ValueChanged<T> onSelect;
-  const _Segmented({
-    required this.options,
-    required this.selected,
-    required this.onSelect,
-  });
+class _FontPicker extends StatelessWidget {
+  final ReaderFont selected;
+  final ValueChanged<ReaderFont> onSelect;
+  const _FontPicker({required this.selected, required this.onSelect});
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).extension<SereneTheme>()!.colors;
-    return Container(
-      padding: const EdgeInsets.all(4),
-      decoration: BoxDecoration(
-        color: colors.surfaceContainerLow,
-        borderRadius: SereneShape.md,
-      ),
-      child: Row(
-        children: [
-          for (final (value, label) in options)
-            Expanded(
-              child: GestureDetector(
-                onTap: () => onSelect(value),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 150),
-                  padding: const EdgeInsets.symmetric(vertical: 10),
-                  decoration: BoxDecoration(
-                    color: value == selected ? colors.surface : Colors.transparent,
-                    borderRadius: SereneShape.md,
-                    boxShadow: value == selected
-                        ? [
-                            BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.06),
-                              blurRadius: 4,
-                            ),
-                          ]
-                        : null,
-                  ),
-                  child: Text(
-                    label,
-                    textAlign: TextAlign.center,
-                    style: SereneType.uiBody.copyWith(
-                      fontFamily: label == 'Literata'
-                          ? 'Literata'
-                          : label == 'Grotesk'
-                              ? 'HankenGrotesk'
-                              : 'Roboto',
-                      color: value == selected ? colors.primary : colors.onSurfaceVariant,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (final f in ReaderFont.values)
+          GestureDetector(
+            onTap: () => onSelect(f),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: f == selected
+                    ? colors.surface
+                    : colors.surfaceContainerLow,
+                borderRadius: BorderRadius.all(SereneShape.full),
+                border: Border.all(
+                  color: f == selected ? colors.primary : colors.outlineVariant,
+                  width: f == selected ? 2 : 1,
+                ),
+                boxShadow: f == selected
+                    ? [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.06),
+                          blurRadius: 4,
+                        ),
+                      ]
+                    : null,
+              ),
+              child: Text(
+                f.label,
+                style: SereneType.labelMd.copyWith(
+                  fontFamily: f.googleFamily,
+                  color: f == selected
+                      ? colors.primary
+                      : colors.onSurfaceVariant,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
             ),
-        ],
-      ),
+          ),
+      ],
     );
   }
 }
@@ -373,7 +366,7 @@ class _MiniPanel extends StatelessWidget {
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: colors.surface,
-        borderRadius: SereneShape.xl,
+        borderRadius: BorderRadius.all(SereneShape.xl),
         border: Border.all(color: colors.surfaceVariant),
       ),
       child: Column(
@@ -411,7 +404,7 @@ class _IconStep extends StatelessWidget {
         padding: const EdgeInsets.all(6),
         decoration: BoxDecoration(
           color: active ? colors.primary.withValues(alpha: 0.12) : Colors.transparent,
-          borderRadius: SereneShape.sm,
+          borderRadius: BorderRadius.all(SereneShape.sm),
         ),
         child: Icon(
           icon,
@@ -504,7 +497,7 @@ class _LayoutButton extends StatelessWidget {
         padding: const EdgeInsets.symmetric(vertical: 18),
         decoration: BoxDecoration(
           color: active ? colors.surface : colors.surfaceContainerLow,
-          borderRadius: SereneShape.xl,
+          borderRadius: BorderRadius.all(SereneShape.xl),
           border: Border.all(
             color: active ? colors.primary : colors.surfaceVariant,
             width: active ? 2 : 1,

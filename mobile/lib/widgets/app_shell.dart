@@ -1,15 +1,19 @@
 import 'package:flutter/material.dart';
 
 import '../models/book.dart';
+import '../screens/books_screen.dart';
 import '../screens/library_screen.dart';
-import '../screens/notes_screen.dart';
-import '../screens/reader_tab_screen.dart';
+import '../screens/reader_screen.dart';
 import '../screens/settings_screen.dart';
+import '../screens/shelves_screen.dart';
+import '../screens/stats_screen.dart';
+import '../theme/serene_theme.dart';
 import '../theme/serene_tokens.dart';
 
 /// The app shell. On phones it shows the bottom navigation with the active
-/// tab rendered as a filled pill; on tablets the same four destinations move
-/// to a fixed side rail (the md+ layout in the design).
+/// tab rendered as a filled pill; on tablets the five destinations move to a
+/// fixed side rail. Tabs match the web: Library, Books, Shelves, Stats,
+/// Settings.
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
 
@@ -22,18 +26,23 @@ class _AppShellState extends State<AppShell> {
 
   void _openBook(Book book) {
     Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => ReaderTabScreen(book: book)),
+      MaterialPageRoute(builder: (_) => ReaderScreen(book: book)),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final isTablet = MediaQuery.sizeOf(context).width >= SereneLayout.tabletBreakpoint;
+    final isTablet =
+        MediaQuery.sizeOf(context).width >= SereneLayout.tabletBreakpoint;
 
     final pages = [
-      LibraryScreen(onOpenBook: _openBook),
-      ReaderTabScreen(onOpenBook: _openBook),
-      const NotesScreen(),
+      LibraryScreen(
+        onOpenBook: _openBook,
+        onGoToShelves: () => setState(() => _index = 2),
+      ),
+      BooksScreen(onOpenBook: _openBook),
+      ShelvesScreen(onOpenBook: _openBook),
+      const StatsScreen(),
       const SettingsScreen(),
     ];
 
@@ -62,9 +71,10 @@ class _AppShellState extends State<AppShell> {
 }
 
 abstract final class _Destinations {
-  static const _library = (Icons.library_books_outlined, Icons.library_books, 'Library');
-  static const _reader = (Icons.book_outlined, Icons.menu_book, 'Reader');
-  static const _notes = (Icons.sticky_note_2_outlined, Icons.sticky_note_2, 'Notes');
+  static const _library = (Icons.home_outlined, Icons.home, 'Library');
+  static const _books = (Icons.library_books_outlined, Icons.library_books, 'Books');
+  static const _shelves = (Icons.collections_bookmark_outlined, Icons.collections_bookmark, 'Shelves');
+  static const _stats = (Icons.leaderboard_outlined, Icons.leaderboard, 'Stats');
   static const _settings = (Icons.settings_outlined, Icons.settings, 'Settings');
 }
 
@@ -78,8 +88,9 @@ class _BottomNav extends StatelessWidget {
     final colors = Theme.of(context).extension<SereneTheme>()!.colors;
     final items = [
       _Destinations._library,
-      _Destinations._reader,
-      _Destinations._notes,
+      _Destinations._books,
+      _Destinations._shelves,
+      _Destinations._stats,
       _Destinations._settings,
     ];
     return Container(
@@ -92,15 +103,16 @@ class _BottomNav extends StatelessWidget {
       child: SafeArea(
         top: false,
         child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceAround,
           children: [
             for (var i = 0; i < items.length; i++)
-              _NavItem(
-                active: index == i,
-                outlinedIcon: items[i].$1,
-                filledIcon: items[i].$2,
-                label: items[i].$3,
-                onTap: () => onSelect(i),
+              Expanded(
+                child: _NavItem(
+                  active: index == i,
+                  outlinedIcon: items[i].$1,
+                  filledIcon: items[i].$2,
+                  label: items[i].$3,
+                  onTap: () => onSelect(i),
+                ),
               ),
           ],
         ),
@@ -129,7 +141,7 @@ class _NavItem extends StatelessWidget {
     final content = AnimatedContainer(
       duration: const Duration(milliseconds: 200),
       curve: Curves.easeOut,
-      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: BoxDecoration(
         color: active ? colors.primaryContainer : Colors.transparent,
         borderRadius: SereneShape.fullPill,
@@ -167,8 +179,9 @@ class _SideRail extends StatelessWidget {
     final colors = Theme.of(context).extension<SereneTheme>()!.colors;
     final items = [
       _Destinations._library,
-      _Destinations._reader,
-      _Destinations._notes,
+      _Destinations._books,
+      _Destinations._shelves,
+      _Destinations._stats,
       _Destinations._settings,
     ];
     return Container(

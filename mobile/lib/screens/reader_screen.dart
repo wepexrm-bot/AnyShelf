@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart';
 
 import '../models/book.dart';
@@ -33,8 +34,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   late ReaderSettings _settings = ReaderSettings.defaults();
   StructuredText? _structured;
+  String? _pdfUrl; // resolved from GET /books/{id} (list omits pdf_url)
   bool _uiVisible = true;
   bool _bookmarked = false;
+  String? _bookmarkId; // backend annotation id of the current bookmark, if any
   bool _loading = true;
   String? _error;
   Timer? _saveTimer;
@@ -77,11 +80,15 @@ class _ReaderScreenState extends State<ReaderScreen> {
       try {
         progress = await _booksService.progress(widget.book.id);
       } catch (_) {}
+      final bookmark = await _loadBookmark();
       if (!mounted) return;
       setState(() {
         _settings = settings;
         _structured = structured;
+        _pdfUrl = detail.pdfUrl;
         _progressNotifier.value = progress;
+        _bookmarked = bookmark != null;
+        _bookmarkId = bookmark;
         _loading = false;
       });
     } catch (e) {
@@ -101,6 +108,45 @@ class _ReaderScreenState extends State<ReaderScreen> {
     });
   }
 
+  /// Finds the synced bookmark annotation id for this book, if one exists.
+  Future<String?> _loadBookmark() async {
+    try {
+      final notes = await _booksService.annotations(widget.book.id);
+      for (final a in notes) {
+        if (a.kind == 'bookmark') return a.id;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  Future<void> _toggleBookmark() async {
+    if (_bookmarkId != null) {
+      final id = _bookmarkId;
+      setState(() {
+        _bookmarked = false;
+        _bookmarkId = null;
+      });
+      if (id != null) {
+        await _booksService.api.delete('/sync/annotations/$id');
+      }
+      return;
+    }
+    setState(() => _bookmarked = true);
+    try {
+      final res = await _booksService.api
+          .post('/sync/annotations', body: {
+        'book_id': widget.book.id,
+        'kind': 'bookmark',
+        'anchor': '',
+      });
+      if (res is Map && res['id'] != null) {
+        setState(() => _bookmarkId = res['id'] as String);
+      }
+    } catch (_) {
+      setState(() => _bookmarked = false);
+    }
+  }
+
   double get _fontSize => _settings.fontSize;
   double get _lineSpacing => _settings.lineHeight.value;
   double get _readingInset => _clampReadingInset(MediaQuery.sizeOf(context).width);
@@ -114,11 +160,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
     return (width * factor).clamp(24.0, 96.0);
   }
 
-  TextStyle get _bodyStyle => TextStyle(
-        fontFamily: _settings.fontFamily,
-        fontSize: _fontSize,
-        height: _lineSpacing,
-        color: _settings.atmosphere.text,
+  TextStyle get _bodyStyle => GoogleFonts.getFont(
+        _settings.fontFamily,
+        textStyle: TextStyle(
+          fontSize: _fontSize,
+          height: _lineSpacing,
+          color: _settings.atmosphere.text,
+        ),
       );
 
   TextStyle get _headingStyle => _bodyStyle.copyWith(
@@ -197,7 +245,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   Widget _fixedPdfView() {
-    final url = widget.book.pdfUrl;
+    final url = _pdfUrl;
     return Container(
       color: _settings.atmosphere.background,
       child: url == null || url.isEmpty
@@ -662,9 +710,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                         filled: _bookmarked,
                         color: text,
                         accent: accent,
-                        onTap: () {
-                          setState(() => _bookmarked = !_bookmarked);
-                        },
+                        onTap: _toggleBookmark,
                       ),
                       _ReaderAction(
                         icon: Icons.volume_up,
@@ -876,7 +922,7 @@ class _HighlightMenu extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           decoration: BoxDecoration(
             color: const Color(0xFF2F3130),
-            borderRadius: SereneShape.md,
+            borderRadius: BorderRadius.all(SereneShape.md),
             boxShadow: [
               BoxShadow(color: Colors.black.withValues(alpha: 0.25), blurRadius: 12),
             ],
