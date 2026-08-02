@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 
 import '../models/book.dart';
+import '../models/shelf.dart';
 import '../services/books_service.dart';
+import '../services/library_refresh.dart';
+import '../services/shelves_service.dart';
 import '../theme/serene_theme.dart';
 import '../theme/serene_tokens.dart';
 import '../widgets/app_header.dart';
@@ -22,7 +25,9 @@ class BooksScreen extends StatefulWidget {
 
 class _BooksScreenState extends State<BooksScreen> {
   final _booksService = BooksService();
+  final _shelvesService = ShelvesService();
   List<Book> _books = [];
+  List<Shelf> _shelves = [];
   bool _loading = true;
   String? _error;
 
@@ -34,6 +39,13 @@ class _BooksScreenState extends State<BooksScreen> {
   void initState() {
     super.initState();
     _load();
+    LibraryRefresh.instance.addListener(_load);
+  }
+
+  @override
+  void dispose() {
+    LibraryRefresh.instance.removeListener(_load);
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -42,7 +54,12 @@ class _BooksScreenState extends State<BooksScreen> {
       _error = null;
     });
     try {
-      final books = await _booksService.list();
+      final results = await Future.wait<dynamic>([
+        _booksService.list(),
+        _shelvesService.list(),
+      ]);
+      final books = results[0] as List<Book>;
+      _shelves = results[1] as List<Shelf>;
       final progress = <String, double>{};
       await Future.wait(books.map((b) async {
         try {
@@ -86,6 +103,85 @@ class _BooksScreenState extends State<BooksScreen> {
 
   bool get _hasActiveFilters => _query.isNotEmpty || _genre.isNotEmpty;
 
+  Future<void> _editBook(Book book) async {
+    final meta = await showDialog<_EditMeta>(
+      context: context,
+      builder: (_) => _EditBookDialog(book: book),
+    );
+    if (meta == null || !mounted) return;
+    try {
+      await _booksService.update(
+        book.id,
+        title: meta.title,
+        author: meta.author,
+        genre: meta.genre,
+      );
+      LibraryRefresh.instance.bump();
+      await _load();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Book updated')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Update failed: $e')),
+      );
+    }
+  }
+
+  Future<void> _moveToShelf(Book book) async {
+    final shelf = await showDialog<Shelf>(
+      context: context,
+      builder: (context) => _ShelfPickerDialog(shelves: _shelves),
+    );
+    if (shelf == null || !mounted) return;
+    try {
+      await _shelvesService.addBook(shelf.id, book.id);
+      LibraryRefresh.instance.bump();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Added to "${shelf.name}"')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not move to shelf: $e')),
+      );
+    }
+  }
+
+  Future<void> _deleteBook(Book book) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Delete "${book.title}"?'),
+        content: const Text('This removes the book from your library. This cannot be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await _booksService.api.delete('/books/${book.id}');
+      LibraryRefresh.instance.bump();
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Delete failed: $e')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).extension<SereneTheme>()!.colors;
@@ -94,7 +190,10 @@ class _BooksScreenState extends State<BooksScreen> {
 
     return Scaffold(
       floatingActionButton: FloatingActionButton(
-        onPressed: () => UploadFlow.showAddSheet(context, onUploaded: _load),
+        onPressed: () => UploadFlow.showAddSheet(context, onUploaded: () async {
+          LibraryRefresh.instance.bump();
+          await _load();
+        }),
         backgroundColor: colors.primaryContainer,
         foregroundColor: colors.onPrimaryContainer,
         shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(SereneShape.xl)),
@@ -139,7 +238,7 @@ class _BooksScreenState extends State<BooksScreen> {
     final screenWidth = MediaQuery.sizeOf(context).width;
     final columns = _columnCount(screenWidth);
     final tileWidth = (screenWidth - 48 - (columns - 1) * 16) / columns;
-    final tileHeight = tileWidth * 3 / 2 + 68;
+    final tileHeight = tileWidth * 3 / 2 + 92;
 
     return RefreshIndicator(
       onRefresh: _load,
@@ -208,6 +307,9 @@ class _BooksScreenState extends State<BooksScreen> {
                     book: filtered[index],
                     progress: filtered[index].progress,
                     onTap: () => widget.onOpenBook(filtered[index]),
+                    onEdit: () => _editBook(filtered[index]),
+                    onMoveToShelf: () => _moveToShelf(filtered[index]),
+                    onDelete: () => _deleteBook(filtered[index]),
                   ),
                   childCount: filtered.length,
                 ),
@@ -372,7 +474,6 @@ class _FilterChip extends StatelessWidget {
   final String label;
   final VoidCallback onTap;
   const _FilterChip({required this.icon, required this.label, required this.onTap});
-
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).extension<SereneTheme>()!.colors;
@@ -394,6 +495,138 @@ class _FilterChip extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _EditMeta {
+  final String title;
+  final String author;
+  final String? genre;
+  const _EditMeta({required this.title, required this.author, this.genre});
+}
+
+class _EditBookDialog extends StatefulWidget {
+  final Book book;
+  const _EditBookDialog({required this.book});
+
+  @override
+  State<_EditBookDialog> createState() => _EditBookDialogState();
+}
+
+class _EditBookDialogState extends State<_EditBookDialog> {
+  late final TextEditingController _titleCtl =
+      TextEditingController(text: widget.book.title);
+  late final TextEditingController _authorCtl =
+      TextEditingController(text: widget.book.author ?? '');
+  late String _genre = widget.book.genre ?? '';
+
+  @override
+  void dispose() {
+    _titleCtl.dispose();
+    _authorCtl.dispose();
+    super.dispose();
+  }
+
+  bool get _valid =>
+      _titleCtl.text.trim().isNotEmpty && _authorCtl.text.trim().isNotEmpty;
+
+  void _submit() {
+    if (!_valid) return;
+    Navigator.of(context).pop(_EditMeta(
+      title: _titleCtl.text.trim(),
+      author: _authorCtl.text.trim(),
+      genre: _genre.isEmpty ? null : _genre,
+    ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Edit book info'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: _titleCtl,
+              decoration: const InputDecoration(labelText: 'Book name'),
+              onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _authorCtl,
+              decoration: const InputDecoration(labelText: 'Author'),
+              onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              initialValue: _genre,
+              isExpanded: true,
+              decoration: const InputDecoration(labelText: 'Genre'),
+              items: [
+                const DropdownMenuItem(value: '', child: Text('No genre')),
+                for (final g in BooksService.genres)
+                  DropdownMenuItem(value: g, child: Text(g)),
+              ],
+              onChanged: (v) => setState(() => _genre = v ?? ''),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _valid ? _submit : null,
+          child: const Text('Save'),
+        ),
+      ],
+    );
+  }
+}
+
+class _ShelfPickerDialog extends StatelessWidget {
+  final List<Shelf> shelves;
+  const _ShelfPickerDialog({required this.shelves});
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).extension<SereneTheme>()!.colors;
+    return AlertDialog(
+      title: const Text('Move to shelf'),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: shelves.isEmpty
+            ? Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Text(
+                  'No shelves yet. Create one from the Shelves tab first.',
+                  style: SereneType.uiBody.copyWith(color: colors.onSurfaceVariant),
+                ),
+              )
+            : ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final s in shelves)
+                    ListTile(
+                      leading: const Icon(Icons.collections_bookmark_outlined),
+                      title: Text(s.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                      subtitle: Text(
+                          '${s.bookCount} ${s.bookCount == 1 ? 'book' : 'books'}'),
+                      onTap: () => Navigator.pop(context, s),
+                    ),
+                ],
+              ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+      ],
     );
   }
 }

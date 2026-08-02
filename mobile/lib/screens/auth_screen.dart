@@ -182,7 +182,12 @@ class _AuthScreenState extends State<AuthScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Icon(Icons.cloud_done, color: colors.accentTeal, size: 44),
+                  Center(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: Image.asset('assets/images/logo.png', width: 44, height: 44),
+                    ),
+                  ),
                   const SizedBox(height: 8),
                   Text(
                     'AnyShelf',

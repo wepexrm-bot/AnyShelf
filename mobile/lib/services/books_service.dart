@@ -2,7 +2,6 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-
 import '../models/annotation.dart';
 import '../models/book.dart';
 import 'api_client.dart';
@@ -29,13 +28,14 @@ class BooksService {
 
   /// Uploads a PDF file with metadata. Returns the uploaded book payload.
   Future<Map<String, dynamic>> upload({
-    required String filePath,
+    required String filename,
+    required Uint8List bytes,
     required String title,
     required String author,
     String? genre,
   }) async {
     final files = <http.MultipartFile>[
-      await http.MultipartFile.fromPath('file', filePath),
+      http.MultipartFile.fromBytes('file', bytes, filename: filename),
     ];
     final data = await api.postMultipart('/books/upload', fields: {
       'title': title,
@@ -56,6 +56,16 @@ class BooksService {
   Future<Book> get(String id) async {
     final data = await api.get('/books/$id');
     return _reachable(Book.fromJson(data as Map<String, dynamic>));
+  }
+
+  /// Edits a book's metadata (title / author / genre).
+  Future<void> update(String id,
+      {String? title, String? author, String? genre}) async {
+    await api.put('/books/$id', body: {
+      if (title != null) 'title': title,
+      if (author != null) 'author': author,
+      if (genre != null) 'genre': genre,
+    });
   }
 
   Book _reachable(Book b) => Book(

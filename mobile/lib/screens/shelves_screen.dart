@@ -3,10 +3,12 @@ import 'package:flutter/material.dart';
 import '../models/book.dart';
 import '../models/shelf.dart';
 import '../services/books_service.dart';
+import '../services/library_refresh.dart';
 import '../services/shelves_service.dart';
 import '../theme/serene_theme.dart';
 import '../theme/serene_tokens.dart';
 import '../widgets/app_header.dart';
+import '../widgets/book_cover.dart';
 import '../widgets/shelf_cover.dart';
 
 /// The Shelves destination: a grid of your shelves (plus a create card), each
@@ -31,6 +33,13 @@ class _ShelvesScreenState extends State<ShelvesScreen> {
   void initState() {
     super.initState();
     _load();
+    LibraryRefresh.instance.addListener(_load);
+  }
+
+  @override
+  void dispose() {
+    LibraryRefresh.instance.removeListener(_load);
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -64,6 +73,7 @@ class _ShelvesScreenState extends State<ShelvesScreen> {
       ),
     );
     if (changed == true) _load();
+    LibraryRefresh.instance.bump();
   }
 
   Future<void> _createShelf() async {
@@ -417,6 +427,9 @@ class _ShelfDetailScreen extends StatefulWidget {
 class _ShelfDetailScreenState extends State<_ShelfDetailScreen> {
   late List<ShelfBook> _shelfBooks = widget.shelf.books;
   late Shelf _shelf = widget.shelf;
+  late final Map<String, Book> _bookById = {
+    for (final b in widget.books) b.id: b,
+  };
   bool _loading = true;
 
   @override
@@ -620,40 +633,64 @@ class _ShelfDetailScreenState extends State<_ShelfDetailScreen> {
                       for (final b in _shelfBooks)
                         Container(
                           margin: const EdgeInsets.only(bottom: 8),
-                          padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
                           decoration: BoxDecoration(
                             color: colors.surfaceContainerLow,
                             borderRadius: const BorderRadius.all(SereneShape.md),
                           ),
-                          child: Row(
-                            children: [
-                              Icon(Icons.auto_stories,
-                                  size: 20, color: colors.onSurfaceVariant),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(b.title,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: SereneType.labelMd
-                                            .copyWith(color: colors.onSurface)),
-                                    if (b.extractionStatus == 'failed')
-                                      Text('Extraction failed',
+                          child: InkWell(
+                            borderRadius: const BorderRadius.all(SereneShape.md),
+                            onTap: () {
+                              final full = _bookById[b.id];
+                              if (full != null) widget.onOpenBook(full);
+                            },
+                            child: Padding(
+                              padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+                              child: Row(
+                                children: [
+                                  SizedBox(
+                                    width: 40,
+                                    height: 56,
+                                    child: BookCover(
+                                      book: _bookById[b.id] ??
+                                          Book(id: b.id, title: b.title),
+                                      borderRadius: 6,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(b.title,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: SereneType.labelMd
+                                                .copyWith(color: colors.onSurface)),
+                                        const SizedBox(height: 2),
+                                        Text(
+                                          _bookById[b.id]?.author ??
+                                              (b.extractionStatus == 'failed'
+                                                  ? 'Extraction failed'
+                                                  : ''),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
                                           style: SereneType.labelSm.copyWith(
-                                              color: colors.error)),
-                                  ],
-                                ),
+                                              color: colors.onSurfaceVariant),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  IconButton(
+                                    onPressed: () => _removeBook(b),
+                                    icon: Icon(Icons.close,
+                                        size: 20, color: colors.onSurfaceVariant),
+                                    tooltip: 'Remove from shelf',
+                                  ),
+                                ],
                               ),
-                              const SizedBox(width: 8),
-                              IconButton(
-                                onPressed: () => _removeBook(b),
-                                icon: Icon(Icons.close,
-                                    size: 20, color: colors.onSurfaceVariant),
-                                tooltip: 'Remove from shelf',
-                              ),
-                            ],
+                            ),
                           ),
                         ),
                   ],

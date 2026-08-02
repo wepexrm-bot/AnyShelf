@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/book.dart';
 import '../models/shelf.dart';
 import '../services/books_service.dart';
+import '../services/library_refresh.dart';
 import '../services/shelves_service.dart';
 import '../theme/serene_theme.dart';
 import '../theme/serene_tokens.dart';
@@ -39,6 +40,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
   void initState() {
     super.initState();
     _load();
+    LibraryRefresh.instance.addListener(_load);
+  }
+
+  @override
+  void dispose() {
+    LibraryRefresh.instance.removeListener(_load);
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -107,6 +115,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     if (confirmed != true) return;
     try {
       await _booksService.api.delete('/books/${book.id}');
+      LibraryRefresh.instance.bump();
       await _load();
     } catch (e) {
       if (!mounted) return;
@@ -124,7 +133,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
     return Scaffold(
       floatingActionButton: FloatingActionButton(
-        onPressed: () => UploadFlow.showAddSheet(context, onUploaded: _load),
+        onPressed: () => UploadFlow.showAddSheet(context, onUploaded: () async {
+          LibraryRefresh.instance.bump();
+          await _load();
+        }),
         backgroundColor: colors.primaryContainer,
         foregroundColor: colors.onPrimaryContainer,
         shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(SereneShape.xl)),

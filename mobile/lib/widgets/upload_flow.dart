@@ -18,9 +18,11 @@ class UploadFlow {
     required Future<void> Function() onUploaded,
   }) async {
     final colors = Theme.of(context).extension<SereneTheme>()!.colors;
+    // The sheet's builder context is disposed as soon as it pops, so the
+    // picker/upload flow must run on the caller's context, which stays mounted.
     await showModalBottomSheet<void>(
       context: context,
-      builder: (context) => Padding(
+      builder: (sheetContext) => Padding(
         padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -40,7 +42,7 @@ class UploadFlow {
               subtitle: const Text('From this device'),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.all(SereneShape.md)),
               onTap: () async {
-                Navigator.pop(context);
+                Navigator.pop(sheetContext);
                 await _pickAndUpload(context, onUploaded);
               },
             ),
@@ -50,7 +52,7 @@ class UploadFlow {
               subtitle: const Text('Fetch a PDF from a link'),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.all(SereneShape.md)),
               onTap: () {
-                Navigator.pop(context);
+                Navigator.pop(sheetContext);
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(content: Text('Upload is coming soon.')),
                 );
@@ -81,12 +83,12 @@ class UploadFlow {
     );
     if (meta == null || !context.mounted) return;
 
-    await _performUpload(context, file.path, meta, onUploaded);
+    await _performUpload(context, file, meta, onUploaded);
   }
 
   static Future<void> _performUpload(
     BuildContext context,
-    String path,
+    XFile file,
     _UploadMeta meta,
     Future<void> Function() onUploaded,
   ) async {
@@ -98,8 +100,10 @@ class UploadFlow {
       ),
     );
     try {
+      final bytes = await file.readAsBytes();
       await BooksService().upload(
-        filePath: path,
+        filename: file.name,
+        bytes: bytes,
         title: meta.title,
         author: meta.author,
         genre: meta.genre,

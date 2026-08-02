@@ -1,14 +1,17 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:syncfusion_flutter_core/theme.dart';
 import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart';
 
 import '../models/book.dart';
 import '../models/reader_settings.dart';
 import '../services/books_service.dart';
 import '../services/settings_service.dart';
+import '../theme/reader_atmosphere.dart';
 import '../theme/serene_theme.dart';
 import '../theme/serene_tokens.dart';
 import 'reader_appearance_sheet.dart';
@@ -30,7 +33,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   final _settingsService = SettingsService();
   final _readingKey = GlobalKey();
   final ScrollController _scrollController = ScrollController();
-  final PageController _pageController = PageController();
+  final _BookController _bookController = _BookController();
 
   late ReaderSettings _settings = ReaderSettings.defaults();
   StructuredText? _structured;
@@ -73,7 +76,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
     _saveTimer?.cancel();
     _paginateTimer?.cancel();
     _scrollController.dispose();
-    _pageController.dispose();
     _progressNotifier.dispose();
     super.dispose();
   }
@@ -258,6 +260,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final moved = (e.position - down).distance > 14;
     final quick = DateTime.now().difference(_tapDownAt) <
         const Duration(milliseconds: 400);
+    // In paginated reflow mode the page view owns taps (tap zones flip pages,
+    // the centre toggles chrome); everywhere else a quick tap toggles chrome.
+    if (_reflowAvailable && _settings.mode == ReaderMode.paginated) return;
     if (!moved && quick) _toggleChrome();
   }
 
@@ -282,14 +287,26 @@ class _ReaderScreenState extends State<ReaderScreen> {
   Widget _fixedPdfView() {
     final url = _pdfUrl;
     return Container(
-      color: _settings.atmosphere.background,
+      color: Colors.black,
       child: url == null || url.isEmpty
           ? Center(
               child: Text('PDF unavailable',
                   style: SereneType.uiBody
                       .copyWith(color: _settings.atmosphere.text)),
             )
-          : SfPdfViewer.network(url),
+          : SfPdfViewerTheme(
+              data: SfPdfViewerThemeData(
+                backgroundColor: Colors.black,
+                progressBarColor: _settings.atmosphere.accent,
+              ),
+              child: SfPdfViewer.network(
+                url,
+                pageSpacing: 0,
+                canShowScrollHead: false,
+                canShowPaginationDialog: false,
+                enableDoubleTapZooming: true,
+              ),
+            ),
     );
   }
 
@@ -317,28 +334,17 @@ class _ReaderScreenState extends State<ReaderScreen> {
     if (pages == null || pages.isEmpty) {
       return const Center(child: CircularProgressIndicator());
     }
-    return NotificationListener<ScrollNotification>(
-      onNotification: _onPageScroll,
-      child: PageView.builder(
-        controller: _pageController,
-        scrollDirection: Axis.vertical,
-        itemCount: pages.length,
-        onPageChanged: (i) => _onPageChanged(i, pages.length),
-        itemBuilder: (context, i) => Padding(
-          padding: EdgeInsets.fromLTRB(
-            _readingInset,
-            MediaQuery.sizeOf(context).height * 0.1,
-            _readingInset,
-            MediaQuery.sizeOf(context).height * 0.08,
-          ),
-          child: ListView(
-            physics: const NeverScrollableScrollPhysics(),
-            children: [
-              for (final b in pages[i]) _buildBlock(b.$1, b.$2),
-            ],
-          ),
-        ),
-      ),
+    final initial = pages.length > 1
+        ? (_progress * (pages.length - 1)).round().clamp(0, pages.length - 1)
+        : 0;
+    return _SinglePageView(
+      key: ValueKey('book-${_pagesKey ?? ''}'),
+      pages: pages,
+      settings: _settings,
+      controller: _bookController,
+      initialPage: initial,
+      onPageChanged: (i, total) => _onPageChanged(i, total),
+      onToggleChrome: _toggleChrome,
     );
   }
 
@@ -360,11 +366,27 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   // ------------------------------------------------------------- pagination
 
+  /// Dimensions of the single page and its text area. The page fills the whole
+  /// reader width at full screen height. The text area is padded so it clears
+  /// the overlay header/footer and leaves room for the page number.
+  ({double pageW, double pageH, double textW, double textH}) _bookGeometry(
+      Size screen) {
+    const padX = 36.0;
+    const padTop = 88.0;
+    const padBottom = 160.0;
+    final pageW = screen.width;
+    final pageH = screen.height;
+    final textW = (pageW - padX * 2).clamp(80.0, 1200.0);
+    final textH = (pageH - padTop - padBottom).clamp(80.0, 2000.0);
+    return (pageW: pageW, pageH: pageH, textW: textW, textH: textH);
+  }
+
   String _paginateKey() {
-    final size = MediaQuery.sizeOf(context);
+    final g = _bookGeometry(MediaQuery.sizeOf(context));
     return '${_settings.fontFamily}|${_fontSize.toStringAsFixed(2)}|'
-        '${_lineSpacing.toStringAsFixed(3)}|${_readingInset.toStringAsFixed(1)}|'
-        '${size.width.toStringAsFixed(1)}|${size.height.toStringAsFixed(1)}';
+        '${_lineSpacing.toStringAsFixed(3)}|'
+        '${g.pageW.toStringAsFixed(1)}|${g.pageH.toStringAsFixed(1)}|'
+        '${g.textW.toStringAsFixed(1)}|${g.textH.toStringAsFixed(1)}';
   }
 
   /// Lazily (re)computes the page layout. Measurement is time-sliced across
@@ -388,9 +410,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
       _paginating = false;
       return;
     }
-    final size = MediaQuery.sizeOf(context);
-    final width = size.width - (2 * _readingInset);
-    final height = size.height * 0.78;
+    final g = _bookGeometry(MediaQuery.sizeOf(context));
+    final width = g.textW;
+    // Leave a small safety margin under the measured text height so pages
+    // never clip the last line if rendered metrics drift from the measured
+    // ones (async font loads etc.).
+    final height = g.textH - 16;
     final pages = <List<(TextBlock, int)>>[];
     var current = <(TextBlock, int)>[];
     var used = 0.0;
@@ -492,8 +517,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
     }
     return false;
   }
-
-  bool _onPageScroll(ScrollNotification n) => false;
 
   void _onPageChanged(int index, int total) {
     if (total <= 1) {
@@ -741,15 +764,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_settings.mode == ReaderMode.paginated) {
         final pages = _pages;
-        if (pages == null || pages.isEmpty || !_pageController.hasClients) {
-          return;
-        }
-        final target = (fraction * (pages.length - 1)).round();
-        _pageController.animateToPage(
-          target,
-          duration: const Duration(milliseconds: 400),
-          curve: Curves.easeOut,
-        );
+        if (pages == null || pages.isEmpty) return;
+        final target = (fraction * (pages.length - 1))
+            .round()
+            .clamp(0, pages.length - 1);
+        _bookController.goToPage(target);
         _onPageChanged(target, pages.length);
         return;
       }
@@ -876,11 +895,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     if (pages == null) return;
     for (var i = 0; i < pages.length; i++) {
       if (pages[i].any((e) => e.$2 == index)) {
-        _pageController.animateToPage(
-          i,
-          duration: const Duration(milliseconds: 400),
-          curve: Curves.easeOut,
-        );
+        _bookController.goToPage(i);
         _onPageChanged(i, pages.length);
         return;
       }
@@ -1087,6 +1102,571 @@ class _ReaderFooter extends StatelessWidget {
     );
   }
 }
+
+/// Drives the single-page reader from the reader chrome (seekbar jumps, search
+/// navigation).
+class _BookController {
+  _SinglePageViewState? _state;
+
+  void nextPage() => _state?.flipForward();
+  void previousPage() => _state?.flipBackward();
+  void goToPage(int pageIndex) => _state?.jumpToPage(pageIndex);
+}
+
+/// The paginated reading surface: one full-screen paper page at a time, turned
+/// with a book-like 3D page-flip around the left spine. Swipe left/right to
+/// turn; a quick tap still toggles the chrome (handled by the outer pointer
+/// listener).
+class _SinglePageView extends StatefulWidget {
+  final List<List<(TextBlock, int)>> pages;
+  final ReaderSettings settings;
+  final _BookController controller;
+  final int initialPage;
+  final void Function(int pageIndex, int total) onPageChanged;
+  final VoidCallback onToggleChrome;
+  const _SinglePageView({
+    super.key,
+    required this.pages,
+    required this.settings,
+    required this.controller,
+    required this.initialPage,
+    required this.onPageChanged,
+    required this.onToggleChrome,
+  });
+
+  @override
+  State<_SinglePageView> createState() => _SinglePageViewState();
+}
+
+class _SinglePageViewState extends State<_SinglePageView>
+    with TickerProviderStateMixin {
+  late int _currentPage;
+  late final AnimationController _flip = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 700),
+  );
+  bool _forward = true;
+  bool _busy = false;
+  double _dragProgress = 0;
+  double _dragStartX = 0;
+
+  int get _maxPage => math.max(0, widget.pages.length - 1);
+  bool get _canFlipForward => _currentPage < _maxPage;
+  bool get _canFlipBackward => _currentPage > 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _currentPage = widget.initialPage.clamp(0, _maxPage).toInt();
+    widget.controller._state = this;
+    _flip.addStatusListener((s) {
+      if (s == AnimationStatus.completed) _finishFlip();
+    });
+  }
+
+  @override
+  void dispose() {
+    widget.controller._state = null;
+    _flip.dispose();
+    super.dispose();
+  }
+
+  void _finishFlip() {
+    if (!mounted) return;
+    setState(() {
+      _currentPage = (_currentPage + (_forward ? 1 : -1)).clamp(0, _maxPage);
+      _busy = false;
+      _flip.value = 0;
+    });
+    widget.onPageChanged(_currentPage, widget.pages.length);
+  }
+
+  void flipForward() {
+    if (_busy || !_canFlipForward) return;
+    setState(() {
+      _forward = true;
+      _busy = true;
+    });
+    _flip.forward(from: 0);
+  }
+
+  void flipBackward() {
+    if (_busy || !_canFlipBackward) return;
+    setState(() {
+      _forward = false;
+      _busy = true;
+    });
+    _flip.forward(from: 0);
+  }
+
+  void jumpToPage(int pageIndex) {
+    final target = pageIndex.clamp(0, _maxPage).toInt();
+    if (target == _currentPage) return;
+    setState(() {
+      _currentPage = target;
+      _busy = false;
+      _flip.value = 0;
+    });
+    widget.onPageChanged(target, widget.pages.length);
+  }
+
+  void _onDragStart(DragStartDetails d) {
+    if (_busy) return;
+    _dragStartX = d.globalPosition.dx;
+    _dragProgress = 0;
+  }
+
+  void _onDragUpdate(DragUpdateDetails d) {
+    if (_busy) return;
+    final dx = d.globalPosition.dx - _dragStartX;
+    _forward = dx < 0;
+    final can = _forward ? _canFlipForward : _canFlipBackward;
+    if (!can) {
+      _flip.value = 0;
+      _dragProgress = 0;
+      return;
+    }
+    final w = MediaQuery.sizeOf(context).width;
+    final delta = _forward ? -dx : dx;
+    _dragProgress = (delta / (w * 0.6)).clamp(0.0, 1.0);
+    _flip.value = _dragProgress;
+  }
+
+  void _onDragEnd(DragEndDetails d) {
+    if (_busy) return;
+    final can = _forward ? _canFlipForward : _canFlipBackward;
+    if (!can) {
+      _flip.animateBack(0, duration: const Duration(milliseconds: 250));
+      _dragProgress = 0;
+      return;
+    }
+    if (_dragProgress >= 0.45) {
+      setState(() => _busy = true);
+      _flip.animateTo(
+        1,
+        duration: const Duration(milliseconds: 380),
+        curve: Curves.easeOutCubic,
+      );
+    } else {
+      _flip.animateBack(
+        0,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOutCubic,
+      );
+    }
+    _dragProgress = 0;
+  }
+
+  void _onTapUp(TapUpDetails d) {
+    final w = MediaQuery.sizeOf(context).width;
+    final x = d.globalPosition.dx;
+    // Left/right thirds turn pages like a real book; the centre toggles chrome.
+    if (x < w * 0.3) {
+      flipBackward();
+    } else if (x > w * 0.7) {
+      flipForward();
+    } else {
+      widget.onToggleChrome();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final pages = widget.pages;
+    if (pages.isEmpty) return const SizedBox.shrink();
+    final paper = _paperFor(widget.settings.atmosphere);
+    const leafPadding = EdgeInsets.fromLTRB(36, 88, 36, 160);
+
+    Widget buildPage(int idx, {bool showPageNumber = true}) => _BookLeaf(
+          blocks: pages[idx],
+          settings: widget.settings,
+          paper: paper,
+          pageNumber: idx + 1,
+          showPageNumber: showPageNumber,
+          padding: leafPadding,
+        );
+
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapUp: _onTapUp,
+      onHorizontalDragStart: _onDragStart,
+      onHorizontalDragUpdate: _onDragUpdate,
+      onHorizontalDragEnd: _onDragEnd,
+      onHorizontalDragCancel: () {
+        if (!_busy) {
+          _flip.animateBack(0, duration: const Duration(milliseconds: 250));
+          _dragProgress = 0;
+        }
+      },
+      child: AnimatedBuilder(
+        animation: _flip,
+        builder: (context, _) {
+          final angle = _flip.value * math.pi;
+          final progress = _flip.value;
+          final showBack = angle > math.pi / 2;
+          final turning = _busy || progress > 0;
+          // 0..1..0 peak at mid-flip: drives the page swell and spine crease.
+          final wave = math.sin(progress * math.pi);
+
+          // Book page turn like the web reader's StPageFlip: the leaf rotates
+          // around the spine while the perspective entry makes it swell toward
+          // the reader at mid-flip (translate moves the leaf along the view Z).
+          final transform = Matrix4.identity()
+            ..setEntry(3, 2, 0.0022)
+            ..translateByDouble(0.0, 0.0, wave * 110.0, 1.0)
+            ..rotateX(_forward ? angle * 0.06 : -angle * 0.06)
+            ..rotateY(_forward ? -angle : angle);
+
+          // Stationary page beneath the turning leaf.
+          int underlay;
+          if (turning && _forward) {
+            underlay = math.min(_currentPage + 1, _maxPage);
+          } else if (turning && !_forward) {
+            underlay = math.max(_currentPage - 1, 0);
+          } else {
+            underlay = _currentPage;
+          }
+
+          // The turning leaf: front face (current page) becomes the back face
+          // (the page being revealed) after the halfway point of the rotation.
+          Widget? leaf;
+          if (turning) {
+            final frontIdx = _forward ? _currentPage : math.max(_currentPage - 1, 0);
+            final backIdx = _forward
+                ? math.min(_currentPage + 1, _maxPage)
+                : _currentPage;
+            final faceIdx = showBack ? backIdx : frontIdx;
+            Widget face = buildPage(faceIdx, showPageNumber: !showBack);
+            if (showBack) {
+              // The far side of the leaf: mirrored and catching less light.
+              face = ColorFiltered(
+                colorFilter: const ColorFilter.matrix(<double>[
+                  0.9, 0, 0, 0, 0,
+                  0, 0.9, 0, 0, 0,
+                  0, 0, 0.9, 0, 0,
+                  0, 0, 0, 1, 0,
+                ]),
+                child: Transform(
+                  alignment: Alignment.center,
+                  transform: Matrix4.diagonal3Values(-1.0, 1.0, 1.0),
+                  child: face,
+                ),
+              );
+            }
+            // The leaf stays flat like a real printed page (StPageFlip pages
+            // don't bend); the only fold is the dark crease right at the spine
+            // where the leaf pivots. Rounded corners match the web reader.
+            leaf = ClipRRect(
+              borderRadius: BorderRadius.circular(6),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Positioned.fill(child: face),
+                  // crease along the spine where the page bends over
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: _forward
+                                ? Alignment.centerLeft
+                                : Alignment.centerRight,
+                            end: Alignment.center,
+                            colors: [
+                              Colors.black.withValues(alpha: 0.34 * wave),
+                              Colors.transparent,
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  // faint sheen sweeping the leaf as it turns
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: _forward
+                                ? Alignment.centerRight
+                                : Alignment.centerLeft,
+                            end: _forward
+                                ? Alignment.centerLeft
+                                : Alignment.centerRight,
+                            colors: [
+                              Colors.white.withValues(alpha: 0.10 * wave),
+                              Colors.transparent,
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }
+
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              // stationary page beneath the turning leaf
+              Positioned.fill(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: buildPage(underlay, showPageNumber: !turning),
+                ),
+              ),
+              // folded bottom corner of the current page, like the web reader's
+              // showPageCorners
+              if (!turning)
+                Positioned(
+                  right: 0,
+                  bottom: 0,
+                  child: CustomPaint(
+                    size: const Size(22, 22),
+                    painter: _CornerFoldPainter(paper),
+                  ),
+                ),
+              // left spine thickness: dark binding edge for a real book feel
+              Positioned(
+                left: 0,
+                top: 0,
+                bottom: 0,
+                width: 10,
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.10),
+                      borderRadius: const BorderRadius.horizontal(
+                        left: Radius.circular(6),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              // right-hand page-stack edge: a few thin leaf edges giving the
+              // open book thickness and depth (hidden while a leaf is turning)
+              if (!turning && _currentPage < _maxPage)
+                for (var k = 1; k <= 3; k++)
+                  Positioned(
+                    right: -1.0 - k * 1.5,
+                    top: 1.0 + k,
+                    bottom: 1.0 - k,
+                    width: 3,
+                    child: IgnorePointer(
+                      child: Container(
+                        color: paper.withValues(alpha: 0.55 - k * 0.12),
+                      ),
+                    ),
+                  ),
+              // turning leaf
+              if (leaf != null)
+                Positioned.fill(
+                  child: ClipRect(
+                    child: Transform(
+                      alignment: _forward
+                          ? Alignment.centerLeft
+                          : Alignment.centerRight,
+                      transform: transform,
+                      child: leaf,
+                    ),
+                  ),
+                ),
+              // curved shadow cast onto the stationary page being covered; the
+              // gradient sits at the fold so it moves as the leaf turns
+              if (turning && progress > 0)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: _forward
+                              ? Alignment.centerRight
+                              : Alignment.centerLeft,
+                          end: Alignment.center,
+                          colors: [
+                            Colors.black.withValues(alpha: 0.18 * progress),
+                            Colors.transparent,
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              // subtle spine shadow on the left edge
+              if (!turning)
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  width: 8,
+                  child: IgnorePointer(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.centerLeft,
+                          end: Alignment.centerRight,
+                          colors: [
+                            Colors.black.withValues(alpha: 0.06),
+                            Colors.transparent,
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// The small triangle of paper turned up at the outer corner of a page — the
+/// web reader's `showPageCorners` look.
+class _CornerFoldPainter extends CustomPainter {
+  final Color paper;
+  const _CornerFoldPainter(this.paper);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const fold = 20.0;
+    final w = size.width;
+    final h = size.height;
+    final corner = Offset(w, h);
+    final left = Offset(w - fold, h);
+    final top = Offset(w, h - fold);
+
+    // soft shadow the turned-up corner casts onto the page beneath
+    final shadow = Path()
+      ..moveTo(left.dx + 3, left.dy)
+      ..lineTo(top.dx, top.dy + 3)
+      ..lineTo(corner.dx, corner.dy)
+      ..close();
+    canvas.drawPath(
+      shadow,
+      Paint()..color = Colors.black.withValues(alpha: 0.12),
+    );
+
+    // the turned-up back of the page corner
+    final flap = Path()
+      ..moveTo(corner.dx, corner.dy)
+      ..lineTo(left.dx, left.dy)
+      ..lineTo(top.dx, top.dy)
+      ..close();
+    canvas.drawPath(
+      flap,
+      Paint()..color = paper.withValues(alpha: 0.98),
+    );
+
+    // crease of the fold
+    canvas.drawLine(
+      left,
+      top,
+      Paint()
+        ..color = Colors.black.withValues(alpha: 0.22)
+        ..strokeWidth = 1,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_CornerFoldPainter oldDelegate) =>
+      oldDelegate.paper != paper;
+}
+
+/// A single paper page: padded text column plus a page number at the bottom
+/// right corner, like a real printed page.
+class _BookLeaf extends StatelessWidget {
+  final List<(TextBlock, int)> blocks;
+  final ReaderSettings settings;
+  final Color paper;
+  final int pageNumber;
+  final bool showPageNumber;
+  final EdgeInsets padding;
+  const _BookLeaf({
+    required this.blocks,
+    required this.settings,
+    required this.paper,
+    required this.pageNumber,
+    this.showPageNumber = true,
+    this.padding = const EdgeInsets.fromLTRB(36, 88, 36, 160),
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final text = settings.atmosphere.text;
+    final bodyStyle = GoogleFonts.getFont(
+      settings.fontFamily,
+      textStyle: TextStyle(
+        fontSize: settings.fontSize,
+        height: settings.lineHeight.value,
+        color: text,
+      ),
+    );
+    final headingStyle = bodyStyle.copyWith(
+      fontSize: settings.fontSize * 1.3,
+      fontWeight: FontWeight.w700,
+    );
+    return Container(
+      color: paper,
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: SingleChildScrollView(
+              physics: const NeverScrollableScrollPhysics(),
+              padding: padding,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  for (final b in blocks)
+                    Padding(
+                      padding: EdgeInsets.only(
+                        bottom: b.$1.isHeading ? 12 : 20,
+                      ),
+                      child: Text(
+                        b.$1.text,
+                        textAlign: settings.textAlign,
+                        style: b.$1.isHeading ? headingStyle : bodyStyle,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          if (showPageNumber)
+            Positioned(
+              right: 24,
+              bottom: 18,
+              child: Text(
+                '$pageNumber',
+                style: SereneType.labelSm.copyWith(
+                  color: text.withValues(alpha: 0.5),
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Maps an atmosphere to the paper color of its book pages, close to the web
+/// reader's `paperFor` palette.
+Color _paperFor(ReadingAtmosphere a) => switch (a.id) {
+      AtmosphereId.light => const Color(0xFFFFFDFB),
+      AtmosphereId.dark => const Color(0xFF26262B),
+      AtmosphereId.sepia => const Color(0xFFFBF5E9),
+      AtmosphereId.night => const Color(0xFF1E293B),
+      AtmosphereId.paper => const Color(0xFFF8F0DC),
+      AtmosphereId.modern => const Color(0xFFFFFFFF),
+      AtmosphereId.mint => const Color(0xFFF8FBF6),
+      AtmosphereId.rose => const Color(0xFFFDF4F5),
+      AtmosphereId.ocean => const Color(0xFFF3F7FB),
+      AtmosphereId.forest => const Color(0xFFF3F8F1),
+    };
 
 /// A sync status indicator in the reader header: a small cloud icon with a
 /// gently breathing dot, matching the AnyShelf design.

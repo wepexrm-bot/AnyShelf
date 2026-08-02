@@ -12,6 +12,7 @@ dependencies:
   http: ^1.2.2
   provider: ^6.1.2
   syncfusion_flutter_pdfviewer: ^34.1.33 # fixed-layout PDF rendering
+  syncfusion_flutter_core: ^34.1.33 # theme API used to set the PDF background
   shared_preferences: ^2.3.2 # token + small local cache
   google_fonts: ^8.2.1
   file_selector: ^1.1.0
@@ -22,6 +23,8 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/images/
   fonts:
     - family: Literata
       fonts:

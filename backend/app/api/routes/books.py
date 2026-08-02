@@ -5,6 +5,7 @@ import tempfile
 import uuid
 
 from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException, BackgroundTasks
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.models import Book, Annotation, ReadingProgress, ReadingSession, Activity, shelf_books, User
@@ -180,6 +181,36 @@ def get_extraction_progress(
     else:
         progress = _extraction_progress.get(book_id, 0)
     return {"extraction_status": status, "progress": progress}
+
+
+class BookUpdate(BaseModel):
+    title: str | None = None
+    author: str | None = None
+    genre: str | None = None
+
+
+@router.put("/{book_id}")
+def update_book(
+    book_id: str,
+    body: BookUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Edit a book's metadata (title / author / genre)."""
+    book = db.query(Book).filter(Book.id == book_id).first()
+    if not book:
+        raise HTTPException(status_code=404, detail="Book not found")
+    if book.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Not your book")
+
+    if body.title is not None and body.title.strip():
+        book.title = body.title.strip()
+    if body.author is not None:
+        book.author = body.author.strip() or None
+    if body.genre is not None:
+        book.genre = body.genre.strip() or None
+    db.commit()
+    return {"id": book.id, "status": "updated"}
 
 
 @router.get("/{book_id}")

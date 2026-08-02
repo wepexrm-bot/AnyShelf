@@ -33,7 +33,10 @@ class AppHeader extends StatelessWidget {
       ),
       child: Row(
         children: [
-          Icon(Icons.cloud_done, color: colors.accentTeal, size: 26),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Image.asset('assets/images/logo.png', width: 28, height: 28),
+          ),
           const SizedBox(width: 8),
           Text(
             'AnyShelf',
