@@ -681,21 +681,145 @@ textarea {
   flex-direction: column;
 }
 
+.cr-viewport {
+  position: relative;
+  overflow: hidden;
+  padding: 12px 0 4px;
+  touch-action: pan-y;
+  overscroll-behavior-x: contain;
+  cursor: grab;
+  user-select: none;
+  mask-image: linear-gradient(to right, transparent, #000 12%, #000 88%, transparent);
+}
+.cr-viewport:active {
+  cursor: grabbing;
+}
+.cr-stage {
+  position: relative;
+  height: 420px;
+  perspective: 1200px;
+}
+.cr-slot {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform-style: preserve-3d;
+  will-change: transform, opacity;
+  cursor: grab;
+}
 .cr-card {
   display: flex;
-  border-radius: 16px;
-  overflow: hidden;
-  background: var(--surface-container-low);
-  border: 1px solid var(--outline-variant);
-  transition: box-shadow 0.25s ease;
+  flex-direction: column;
+  align-items: center;
+  width: 200px;
+  text-decoration: none;
+  color: inherit;
 }
-.cr-card:hover {
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.06);
-}
-.cr-cover-panel {
+.cr-cover-inner {
   position: relative;
-  width: 100%;
-  aspect-ratio: 3 / 4;
+  width: 200px;
+  height: 280px;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.18);
+}
+.cr-cover-parallax {
+  position: absolute;
+  inset: 0;
+  will-change: transform;
+}
+.cr-cover-drift {
+  position: absolute;
+  top: -18%;
+  bottom: -18%;
+  left: -18%;
+  right: -18%;
+  background-position: center;
+  background-size: cover;
+  animation: cr-drift 8s ease-in-out infinite;
+}
+@keyframes cr-drift {
+  0%,
+  100% {
+    transform: translateY(0) scale(1.06);
+  }
+  50% {
+    transform: translateY(-14px) scale(1.1);
+  }
+}
+.cr-cover-fallback {
+  position: absolute;
+  inset: 0;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  color: #fff;
+}
+.cr-cover-fallback-title {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.cr-cover-fallback-author {
+  font-size: 12px;
+  opacity: 0.8;
+  margin-top: 4px;
+  font-style: italic;
+}
+.cr-meta {
+  width: 200px;
+  margin-top: 10px;
+  padding: 0 4px;
+}
+.cr-meta-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--on-surface);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cr-meta-author {
+  font-size: 12px;
+  color: var(--on-surface-variant);
+  margin-bottom: 6px;
+}
+.cr-meta-pct {
+  font-size: 11px;
+  color: var(--on-surface-variant);
+  margin-top: 4px;
+}
+.cr-arrow {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--outline-variant);
+  background: var(--surface-container-lowest);
+  color: var(--on-surface);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+  transition: background-color 0.2s, color 0.2s, transform 0.2s;
+}
+.cr-arrow:hover {
+  background: var(--secondary-container);
+  color: var(--on-secondary-container);
+}
+.cr-arrow:active {
+  transform: translateY(-50%) scale(0.94);
+}
+.cr-arrow-left {
+  left: 0;
+}
+.cr-arrow-right {
+  right: 0;
 }
 
 .books-grid {
@@ -856,11 +980,6 @@ textarea {
 @media (min-width: 768px) {
   .md-row {
     flex-direction: row;
-  }
-
-  .cr-cover-panel {
-    width: 33.333%;
-    aspect-ratio: auto;
   }
 }
 

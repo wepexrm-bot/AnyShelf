@@ -1,8 +1,9 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams, useLocation } from "react-router-dom";
 import Sidebar from "./Sidebar";
 import { api } from "../api";
 import AppHeader from "./AppHeader";
+import ContinueReadingCarousel from "./ContinueReadingCarousel";
 import { SHELVES_CHANGED, useShelfModal } from "./ShelfModalContext";
 import { coverStyle } from "./ShelfForm";
 import UploadModal from "./UploadModal";
@@ -18,7 +19,7 @@ const BOOK_ACCENTS = [
   "#d84315",
 ];
 
-function bookAccent(book) {
+export function bookAccent(book) {
   const s = (book.title || "") + (book.author || "");
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
@@ -32,7 +33,7 @@ function hexToRgb(hex) {
   return { r: (num >> 16) & 255, g: (num >> 8) & 255, b: num & 255 };
 }
 
-function ensureReadable(hex) {
+export function ensureReadable(hex) {
   const { r, g, b } = hexToRgb(hex);
   const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
   if (lum < 0.5) return hex;
@@ -40,7 +41,7 @@ function ensureReadable(hex) {
   return "#" + [r, g, b].map((v) => Math.round(v * f).toString(16).padStart(2, "0")).join("");
 }
 
-function useImageAccent(src, fallback) {
+export function useImageAccent(src, fallback) {
   const [accent, setAccent] = useState(null);
   useEffect(() => {
     let cancelled = false;
@@ -109,7 +110,6 @@ export default function Library() {
   const [bookProgress, setBookProgress] = useState({});
   const [shelfNames, setShelfNames] = useState({});
   const [extracting, setExtracting] = useState({});
-  const [crIndex, setCrIndex] = useState(0);
   const timersRef = useRef(new Map());
 
   const stopPolling = (bookId) => {
@@ -225,27 +225,13 @@ export default function Library() {
 
   const isCompleted = (b) => (bookProgress[b.id] || 0) >= 99.5;
 
-  const resumeBooks = books.filter((b) => !isCompleted(b) && (bookProgress[b.id] || 0) > 0);
-  const continueReading =
-    resumeBooks.length > 0
-      ? resumeBooks[crIndex % resumeBooks.length]
-      : books.find((b) => !isCompleted(b)) || books[0];
-  const nextResume = () => {
-    if (resumeBooks.length > 1) setCrIndex((i) => (i + 1) % resumeBooks.length);
-  };
+  const resumeBooks = useMemo(
+    () => books.filter((b) => !isCompleted(b) && (bookProgress[b.id] || 0) > 0),
+    [books, bookProgress]
+  );
   const recentlyAdded = filtered.slice(0, 3);
   const extractionFor = (book) =>
     extracting[book.id] || { status: book.extraction_status, progress: 0 };
-  const crAccent = ensureReadable(
-    useImageAccent(continueReading?.cover_url, continueReading ? bookAccent(continueReading) : BOOK_ACCENTS[0])
-  );
-  const crPct = continueReading
-    ? continueReading.extraction_status === "done"
-      ? bookProgress[continueReading.id] > 0
-        ? Math.round(bookProgress[continueReading.id])
-        : 0
-      : extractionFor(continueReading).progress
-    : 0;
 
   return (
     <div style={{ minHeight: "100vh" }}>
@@ -264,264 +250,13 @@ export default function Library() {
 
       <main className="main-desktop" style={{ paddingTop: 32, paddingBottom: 64, paddingRight: 24 }}>
         <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 48 }}>
-          {/* Continue Reading hero */}
-          {continueReading && (
-            <section style={{ position: "relative" }}>
-              <h2
-                style={{
-                  fontFamily: "var(--font-display)",
-                  fontSize: 18,
-                  color: "var(--on-surface)",
-                  marginBottom: 24,
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                }}
-              >
-                <span className="icon text-primary" style={{ fontSize: 20 }}>auto_stories</span>
-                Continue Reading
-                {resumeBooks.length > 1 && (
-                  <span
-                    style={{
-                      fontSize: 12,
-                      fontWeight: 600,
-                      color: "var(--on-surface-variant)",
-                      background: "var(--surface-container-lowest)",
-                      border: "1px solid var(--outline-variant)",
-                      borderRadius: 999,
-                      padding: "2px 10px",
-                      marginLeft: 4,
-                    }}
-                  >
-                    {(crIndex % resumeBooks.length) + 1}/{resumeBooks.length}
-                  </span>
-                )}
-              </h2>
-
-              <div className="md-row cr-card">
-                {/* Cover panel */}
-                <div
-                  className="cr-cover-panel"
-                  style={{
-                    background: continueReading.cover_url
-                      ? `url(${continueReading.cover_url}) center / cover no-repeat`
-                      : `linear-gradient(150deg, ${crAccent} 0%, ${crAccent}cc 55%, #0d0f0d 140%)`,
-                  }}
-                >
-                  <div
-                    style={{
-                      position: "absolute",
-                      inset: 0,
-                      background: "linear-gradient(to top, rgba(0,0,0,0.42), rgba(0,0,0,0.05) 55%)",
-                    }}
-                  />
-                  <div
-                    style={{
-                      position: "absolute",
-                      inset: 0,
-                      padding: 32,
-                      display: "flex",
-                      flexDirection: "column",
-                      justifyContent: "center",
-                      color: "#fff",
-                    }}
-                  >
-                    {continueReading.cover_url ? null : (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                        <h3
-                          style={{
-                            fontFamily: "var(--font-display)",
-                            fontSize: 28,
-                            fontWeight: 700,
-                            lineHeight: 1.1,
-                            textShadow: "0 2px 8px rgba(0,0,0,0.35)",
-                          }}
-                        >
-                          {continueReading.title.length > 46
-                            ? continueReading.title.slice(0, 46) + "…"
-                            : continueReading.title}
-                        </h3>
-                        <div style={{ fontFamily: "var(--font-body)", fontStyle: "italic", fontSize: 16, opacity: 0.85 }}>
-                          {continueReading.author || "Unknown author"}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Content panel */}
-                <div
-                  style={{
-                    flex: 1,
-                    minWidth: 0,
-                    padding: 32,
-                    background: "var(--surface-container-lowest)",
-                    display: "flex",
-                    flexDirection: "column",
-                    justifyContent: "space-between",
-                  }}
-                >
-                  <div>
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "flex-start",
-                        justifyContent: "space-between",
-                        marginBottom: 4,
-                      }}
-                    >
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div
-                          style={{
-                            fontSize: 11,
-                            textTransform: "uppercase",
-                            letterSpacing: 2,
-                            fontWeight: 600,
-                            color: crAccent,
-                            marginBottom: 8,
-                          }}
-                        >
-                          {bookProgress[continueReading.id] > 0 ? "In Progress" : continueReading.is_scanned ? "Scanned" : "Ready"}
-                        </div>
-                        {continueReading.cover_url ? (
-                          <>
-                            <h3
-                              style={{
-                                fontFamily: "var(--font-display)",
-                                fontSize: 24,
-                                lineHeight: 1.2,
-                                color: crAccent,
-                                margin: 0,
-                              }}
-                            >
-                              {continueReading.title.length > 60
-                                ? continueReading.title.slice(0, 60) + "…"
-                                : continueReading.title}
-                            </h3>
-                            <div style={{ fontSize: 15, color: crAccent, opacity: 0.85, marginTop: 4 }}>
-                              {continueReading.author || "Unknown author"}
-                            </div>
-                          </>
-                        ) : (
-                          <h3
-                            style={{
-                              fontFamily: "var(--font-display)",
-                              fontSize: 22,
-                              lineHeight: 1.25,
-                              color: "var(--on-surface)",
-                              margin: 0,
-                            }}
-                          >
-                            {continueReading.extraction_status === "done"
-                              ? "Continue where you left off"
-                              : continueReading.extraction_status === "failed"
-                              ? "Extraction failed"
-                              : `Extracting text… ${extractionFor(continueReading).progress}%`}
-                          </h3>
-                        )}
-                      </div>
-                      <button
-                        className="icon"
-                        title="Bookmark"
-                        style={{
-                          background: "none",
-                          border: "none",
-                          cursor: "default",
-                          fontSize: 24,
-                          color: "var(--on-surface-variant)",
-                          padding: 4,
-                          marginLeft: 12,
-                        }}
-                      >
-                        bookmark_add
-                      </button>
-                    </div>
-                    {continueReading.extraction_status !== "done" && (
-                      <p
-                        className="text-muted"
-                        style={{
-                          fontFamily: "var(--font-body)",
-                          fontSize: 16,
-                          fontStyle: "italic",
-                          lineHeight: 1.7,
-                          margin: "8px 0 24px",
-                          maxWidth: "60ch",
-                        }}
-                      >
-                        {continueReading.extraction_status === "failed"
-                          ? "We couldn't extract the text from this PDF. Open it to read in page view."
-                          : "We're extracting the text from this PDF. This usually takes a minute or two."}
-                      </p>
-                    )}
-                  </div>
-
-                  <div style={{ borderTop: "1px solid var(--outline-variant)", paddingTop: 20 }}>
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        fontSize: 13,
-                        color: "var(--on-surface-variant)",
-                        marginBottom: 10,
-                      }}
-                    >
-                      <span style={{ fontWeight: 600 }}>
-                        {crPct}% {continueReading.extraction_status === "done" ? "Completed" : "Extracted"}
-                      </span>
-                    </div>
-                    <ProgressBar value={crPct} />
-                    <div style={{ display: "flex", gap: 12, marginTop: 20 }}>
-                      <Link
-                        to={`/read/${continueReading.id}`}
-                        state={{ from: location.pathname }}
-                        className="btn btn-primary"
-                        style={{ padding: "12px 32px", borderRadius: 999 }}
-                      >
-                        <span className="icon" style={{ fontSize: 18 }}>menu_book</span>
-                        Resume
-                      </Link>
-                      <button
-                        className="btn btn-ghost"
-                        onClick={() => handleDelete(continueReading.id)}
-                        style={{ padding: "12px 24px", borderRadius: 999 }}
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {resumeBooks.length > 1 && (
-                <button
-                  title="Next book to resume"
-                  onClick={nextResume}
-                  style={{
-                    position: "absolute",
-                    right: -20,
-                    top: "50%",
-                    transform: "translateY(-50%)",
-                    width: 56,
-                    height: 56,
-                    borderRadius: "50%",
-                    background: "var(--primary)",
-                    color: "#fff",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    border: "none",
-                    cursor: "pointer",
-                    boxShadow: "0 6px 20px rgba(0,0,0,0.28)",
-                    zIndex: 5,
-                  }}
-                >
-                  <span className="icon" style={{ fontSize: 30 }}>chevron_right</span>
-                </button>
-              )}
-            </section>
-          )}
-
+          {/* Continue Reading carousel */}
+          <ContinueReadingCarousel
+            books={resumeBooks}
+            bookProgress={bookProgress}
+            extractionFor={extractionFor}
+            location={location}
+          />
           {/* Bento: shelves + stats */}
           <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 24 }}>
             <section>
