@@ -202,18 +202,29 @@ class _SideRail extends StatelessWidget {
         child: Column(
           children: [
             const SizedBox(height: 24),
-            for (var i = 0; i < items.length - 1; i++)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                child: _RailItem(
-                  active: index == i,
-                  outlinedIcon: items[i].$1,
-                  filledIcon: items[i].$2,
-                  label: items[i].$3,
-                  onTap: () => onSelect(i),
+            // The main items sit above a pinned Settings item; when the
+            // keyboard shrinks the body height they scroll instead of
+            // overflowing.
+            Flexible(
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (var i = 0; i < items.length - 1; i++)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: _RailItem(
+                          active: index == i,
+                          outlinedIcon: items[i].$1,
+                          filledIcon: items[i].$2,
+                          label: items[i].$3,
+                          onTap: () => onSelect(i),
+                        ),
+                      ),
+                  ],
                 ),
               ),
-            const Spacer(),
+            ),
             // Settings stays pinned to the bottom of the rail.
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 8),

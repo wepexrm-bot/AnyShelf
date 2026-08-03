@@ -146,8 +146,30 @@ class _ReaderScreenState extends State<ReaderScreen> {
   /// debounced save. Called when leaving the reader so progress is never lost
   /// to the debounce timer.
   void _flushProgressSave() {
+    // Never persist a position the restore is still settling on -- the jump's
+    // viewport may not have reached the saved block yet.
+    if (_restoringScroll) return;
     if (_progress > 0) {
       _booksService.saveProgress(widget.book.id, fraction: _progress);
+    }
+  }
+
+  /// Kicks off (or reuses) the reader font load and waits for it to finish so
+  /// TextPainter measurements match the rendered text. google_fonts fetches
+  /// the family asynchronously on first use; measuring before it lands caches
+  /// fallback-font metrics that never match the rendered layout, which corrupts
+  /// the scroll offset table (and pagination). Bounded so an offline device
+  /// still opens.
+  Future<void> _whenReaderFontLoaded() async {
+    // Accessing the reader styles registers the load with google_fonts'
+    // pending set, so pendingFonts() below actually waits for it.
+    // ignore: unnecessary_statements
+    _bodyStyle;
+    try {
+      await GoogleFonts.pendingFonts().timeout(const Duration(seconds: 6));
+    } catch (_) {
+      // Offline / slow network: the fallback font is used for both measurement
+      // and rendering, so the offset table stays self-consistent.
     }
   }
 
@@ -173,8 +195,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
         _progressNotifier.value = progress;
         _bookmarked = bookmark != null;
         _bookmarkId = bookmark;
-        _loading = false;
       });
+      // Wait for the reader font before the first render so the offset table
+      // and pagination are measured with the real family, never the fallback.
+      await _whenReaderFontLoaded();
+      if (!mounted) return;
+      setState(() => _loading = false);
       if (_settings.mode == ReaderMode.scroll && progress > 0) {
         _restoreScrollOnShow = true;
       }
@@ -221,6 +247,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   void _updateSettings(ReaderSettings next) {
     final modeChanged = next.mode != _settings.mode;
+    final fontChanged = next.font != _settings.font;
     if (modeChanged) {
       // Capture which block is current *before* switching, so the new view can
       // land on the same content (not a fuzzy fraction that drifts a chapter).
@@ -229,10 +256,26 @@ class _ReaderScreenState extends State<ReaderScreen> {
       // reusing stale per-mode flip state (same _pagesKey across a switch).
       _anchorSeed++;
     }
+    if (fontChanged) {
+      _blockOffsetsCache = null;
+      _blockOffsetsCacheKey = null;
+    }
     setState(() {
       _settings = next;
       if (next.mode == ReaderMode.scroll) _restoreScrollOnShow = true;
     });
+    if (fontChanged) {
+      // The new family loads asynchronously; re-measure once it lands so the
+      // offset table matches the freshly rendered layout.
+      _whenReaderFontLoaded().then((_) {
+        if (!mounted) return;
+        setState(() {
+          _blockOffsetsCache = null;
+          _blockOffsetsCacheKey = null;
+        });
+        _syncBlockFromScroll();
+      });
+    }
     _saveTimer?.cancel();
     _saveTimer = Timer(const Duration(milliseconds: 400), () {
       _settingsService.save(next);
@@ -582,7 +625,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
     // table silently underestimates every block (device font scaling > 1) and
     // restore/jump land at an earlier block than requested.
     final ts = MediaQuery.textScalerOf(context);
-    final key = '${_fontSize.toStringAsFixed(2)}|'
+    final key = '${_settings.font.googleFamily}|'
+        '${_fontSize.toStringAsFixed(2)}|'
         '${_lineSpacing.toStringAsFixed(3)}|'
         '${_readingInset.toStringAsFixed(1)}|'
         '${width.toStringAsFixed(1)}|'
@@ -1339,24 +1383,52 @@ class _ReaderScreenState extends State<ReaderScreen> {
       return;
     }
     if (!mounted) return;
+    FocusManager.instance.primaryFocus?.unfocus();
 
     final colors = Theme.of(context).extension<SereneTheme>()!.colors;
     final chosen = await showDialog<(int, TextBlock)>(
       context: context,
-      builder: (context) => SimpleDialog(
-        title: Text('${matches.length} result${matches.length == 1 ? '' : 's'}'),
-        children: [
-          for (final m in matches.take(12))
-            SimpleDialogOption(
-              onPressed: () => Navigator.pop(context, m),
-              child: Text(
-                m.$2.text,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: SereneType.uiBody.copyWith(color: colors.onSurface),
+      // A small, fixed-size card: never full-screen, leaves a dismissible
+      // barrier, and fits on phones and tablets alike.
+      builder: (context) => Dialog(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 300, maxWidth: 440),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 14, 20, 4),
+                child: Text(
+                  '${matches.length} result${matches.length == 1 ? '' : 's'}',
+                  style: SereneType.labelMd.copyWith(color: colors.onSurface),
+                ),
               ),
-            ),
-        ],
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.only(bottom: 8),
+                  itemCount: math.min(matches.length, 8),
+                  itemBuilder: (context, i) {
+                    final m = matches[i];
+                    return ListTile(
+                      dense: true,
+                      contentPadding:
+                          const EdgeInsets.symmetric(horizontal: 20, vertical: 0),
+                      title: Text(
+                        m.$2.text,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: SereneType.uiBody.copyWith(color: colors.onSurface),
+                      ),
+                      onTap: () => Navigator.pop(context, m),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
     if (chosen == null) return;

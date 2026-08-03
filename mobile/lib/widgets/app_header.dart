@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -41,38 +42,52 @@ class AppHeader extends StatelessWidget {
         bottom: false,
         child: Padding(
           padding: padding,
-          child: Row(
-            children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: Image.asset('assets/images/logo.png', width: 28, height: 28),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                'AnyShelf',
-                style: SereneType.headlineMobile.copyWith(
-                  color: colors.accentTeal,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(width: 16),
-              const Expanded(child: _HeaderSearch()),
-              const SizedBox(width: 12),
-              if (showThemeToggle) ...[
-                Consumer<UiModeController>(
-                  builder: (context, uiMode, _) => IconButton(
-                    onPressed: uiMode.toggle,
-                    tooltip: uiMode.isDark ? 'Switch to light mode' : 'Switch to dark mode',
-                    icon: Icon(
-                      uiMode.isDark ? Icons.light_mode_outlined : Icons.dark_mode_outlined,
-                      color: colors.onSurfaceVariant,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < 560;
+              return Row(
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Image.asset('assets/images/logo.png', width: 28, height: 28),
+                  ),
+                  if (compact)
+                    const SizedBox(width: 8)
+                  else ...[
+                    const SizedBox(width: 8),
+                    Text(
+                      'AnyShelf',
+                      style: SereneType.headlineMobile.copyWith(
+                        color: colors.accentTeal,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                  ],
+                  Expanded(
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(minWidth: 120),
+                      child: const _HeaderSearch(),
                     ),
                   ),
-                ),
-                const SizedBox(width: 4),
-              ],
-              trailing ?? (showSync ? const SyncIndicator() : const SizedBox()),
-            ],
+                  if (compact) const SizedBox(width: 8) else const SizedBox(width: 12),
+                  if (showThemeToggle) ...[
+                    Consumer<UiModeController>(
+                      builder: (context, uiMode, _) => IconButton(
+                        onPressed: uiMode.toggle,
+                        tooltip: uiMode.isDark ? 'Switch to light mode' : 'Switch to dark mode',
+                        icon: Icon(
+                          uiMode.isDark ? Icons.light_mode_outlined : Icons.dark_mode_outlined,
+                          color: colors.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                  ],
+                  trailing ?? (showSync ? const SyncIndicator() : const SizedBox()),
+                ],
+              );
+            },
           ),
         ),
       ),
@@ -100,7 +115,12 @@ class _HeaderSearchState extends State<_HeaderSearch> {
   bool _loading = false;
   double? _panelWidth;
   double? _panelHeight;
+  double? _panelMaxHeight;
+  double? _panelLeft;
   OverlayEntry? _entry;
+  static const double _maxPanelCap = 320;
+  static const double _bottomMargin = 24;
+  static const double _minPanelHeight = 120;
 
   bool get _showPanel =>
       _focus.hasFocus && _ctl.text.trim().isNotEmpty;
@@ -126,6 +146,19 @@ class _HeaderSearchState extends State<_HeaderSearch> {
     if (box is RenderBox && box.hasSize) {
       _panelWidth = box.size.width;
       _panelHeight = box.size.height;
+      _panelLeft = box.localToGlobal(Offset.zero).dx;
+
+      final fieldBottomOnScreen =
+          box.localToGlobal(Offset(0, box.size.height)).dy;
+      final screenHeight = MediaQuery.sizeOf(ctx!).height;
+      final keyboardHeight = MediaQuery.viewInsetsOf(ctx).bottom;
+
+      final availableBelow = screenHeight -
+          fieldBottomOnScreen -
+          keyboardHeight -
+          _bottomMargin;
+
+      _panelMaxHeight = availableBelow.clamp(_minPanelHeight, _maxPanelCap);
     }
   }
 
@@ -136,11 +169,28 @@ class _HeaderSearchState extends State<_HeaderSearch> {
     if (_panelHeight == null) return;
     final overlay = Overlay.of(context);
     _entry = OverlayEntry(
-      builder: (_) => CompositedTransformFollower(
-        link: _link,
-        showWhenUnlinked: false,
-        offset: Offset(0, (_panelHeight ?? 0) + 8),
-        child: _buildPanel(),
+      builder: (_) => Stack(
+        children: [
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => _focus.unfocus(),
+            ),
+          ),
+          CompositedTransformFollower(
+            link: _link,
+            showWhenUnlinked: false,
+            offset: Offset(0, (_panelHeight ?? 0) + 8),
+            // The overlay lays out non-positioned children with tight
+            // full-screen constraints; RenderFollowerLayer passes them on
+            // verbatim, so an un-wrapped Material would fill the screen.
+            // Align(topLeft) lets the Material size to its content instead.
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: _buildPanel(),
+            ),
+          ),
+        ],
       ),
     );
     overlay.insert(_entry!);
@@ -212,6 +262,11 @@ class _HeaderSearchState extends State<_HeaderSearch> {
   Widget _buildPanel() {
     final colors = Theme.of(context).extension<SereneTheme>()!.colors;
     final width = _panelWidth ?? MediaQuery.sizeOf(context).width - 48;
+    final screenWidth = MediaQuery.sizeOf(context).width;
+    final maxWidth = screenWidth - (_panelLeft ?? 24) - 16;
+    final widthWithinScreen = math.min(width, maxWidth);
+    final widthAtLeast = math.min(280.0, maxWidth);
+    final clampedWidth = math.max(widthWithinScreen, widthAtLeast);
     Widget content;
     if (_loading) {
       content = Padding(
@@ -274,8 +329,8 @@ class _HeaderSearchState extends State<_HeaderSearch> {
       borderRadius: BorderRadius.circular(16),
       clipBehavior: Clip.antiAlias,
       child: Container(
-        width: width,
-        constraints: const BoxConstraints(maxHeight: 360),
+        width: clampedWidth,
+        constraints: BoxConstraints(maxHeight: _panelMaxHeight ?? _maxPanelCap),
         child: content,
       ),
     );
@@ -316,6 +371,15 @@ class _HeaderSearchState extends State<_HeaderSearch> {
         controller: _ctl,
         focusNode: _focus,
         onChanged: _onChanged,
+        onTapOutside: (_) {
+          // Android/iOS don't unfocus on outside taps by default, so the
+          // keyboard would stay up until the back button is pressed. Dismiss
+          // it here — but only while no results panel is showing: the panel's
+          // barrier already handles dismissal, and onTapOutside fires on
+          // pointer down, so acting on it there would interrupt taps on
+          // result rows.
+          if (!_showPanel) _focus.unfocus();
+        },
         style: SereneType.uiBody.copyWith(fontSize: 14, color: colors.onSurface),
         decoration: InputDecoration(
           hintText: 'Search your library',
