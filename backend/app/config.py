@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -33,6 +34,18 @@ class Settings(BaseSettings):
     # OCR
     ocr_confidence_threshold: float = 0.65  # below this, fall back to fixed-layout mode
     use_cloud_ocr: bool = False  # False = Tesseract locally, True = cloud OCR API
+
+    @field_validator(
+        "s3_endpoint_url",
+        "smtp_host",
+        "smtp_user",
+        "smtp_password",
+        mode="before",
+    )
+    @classmethod
+    def empty_string_to_none(cls, v: object) -> object:
+        """Treat empty env vars (common on hosting panels) as unset."""
+        return None if v == "" else v
 
     class Config:
         env_file = ".env"
