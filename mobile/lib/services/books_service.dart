@@ -117,16 +117,24 @@ class BooksService {
     final data = await api.get('/sync/progress/$bookId') as Map;
     final page = (data['current_page'] as num?)?.toDouble() ?? 0;
     final offset = (data['current_offset'] as num?)?.toDouble() ?? 0;
-    // current_offset carries the overall fraction; fall back to the page number.
-    return offset > 0 ? offset : page;
+    // current_offset carries the overall fraction (mobile writer). The web
+    // writes a 0-100 percentage into current_page, so normalise that to a
+    // fraction too -- otherwise a book read on web resumes at the wrong place
+    // on mobile.
+    if (offset > 0) return offset;
+    if (page > 0) return (page / 100).clamp(0.0, 1.0);
+    return 0;
   }
 
   Future<void> saveProgress(String bookId,
       {double? fraction, double? page}) async {
+    final f = (fraction ?? 0).clamp(0.0, 1.0);
     await api.post('/sync/progress', body: {
       'book_id': bookId,
-      'current_page': page ?? 0,
-      'current_offset': fraction ?? 0,
+      // current_page stores the 0-100 percentage the web and backend stats
+      // read; current_offset stores the 0-1 fraction the mobile reader uses.
+      'current_page': page ?? (f * 100),
+      'current_offset': f,
     });
   }
 

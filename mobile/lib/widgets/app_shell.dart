@@ -7,6 +7,7 @@ import '../screens/reader_screen.dart';
 import '../screens/settings_screen.dart';
 import '../screens/shelves_screen.dart';
 import '../screens/stats_screen.dart';
+import '../services/library_refresh.dart';
 import '../theme/serene_theme.dart';
 import '../theme/serene_tokens.dart';
 
@@ -25,9 +26,16 @@ class _AppShellState extends State<AppShell> {
   int _index = 0;
 
   void _openBook(Book book) {
-    Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => ReaderScreen(book: book)),
-    );
+    Navigator.of(context)
+        .push(
+          MaterialPageRoute(builder: (_) => ReaderScreen(book: book)),
+        )
+        .then((_) {
+      // Reading changes progress; make the Library (and Books/Shelves) reload
+      // so "Continue Reading" reflects the new position without a manual
+      // pull-to-refresh.
+      LibraryRefresh.instance.bump();
+    });
   }
 
   @override

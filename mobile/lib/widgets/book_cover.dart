@@ -12,6 +12,7 @@ class BookCover extends StatelessWidget {
   final double? progress;
   final double borderRadius;
   final VoidCallback? onTap;
+  final bool showProgress;
 
   const BookCover({
     super.key,
@@ -19,6 +20,7 @@ class BookCover extends StatelessWidget {
     this.progress,
     this.borderRadius = 16,
     this.onTap,
+    this.showProgress = true,
   });
 
   @override
@@ -44,7 +46,7 @@ class BookCover extends StatelessWidget {
               ),
             ),
           ),
-          if (progress != null && progress! > 0)
+          if (showProgress && progress != null && progress! > 0)
             Align(
               alignment: Alignment.bottomCenter,
               child: Container(

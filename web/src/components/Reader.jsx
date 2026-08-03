@@ -288,7 +288,7 @@ export default function Reader() {
     const timer = setTimeout(() => {
       api("/sync/progress", {
         method: "POST",
-        body: { book_id: bookId, current_page: progress, current_offset: 0 },
+        body: { book_id: bookId, current_page: progress, current_offset: progress / 100 },
       }).catch(() => {});
     }, 800);
     return () => clearTimeout(timer);

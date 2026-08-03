@@ -329,7 +329,10 @@ class _ContinueReadingRow extends StatelessWidget {
                     child: Stack(
                       fit: StackFit.expand,
                       children: [
-                        BookCover(book: book, progress: book.progress),
+                        BookCover(
+                            book: book,
+                            progress: book.progress,
+                            showProgress: false),
                         Center(
                           child: Container(
                             width: 48,
@@ -366,11 +369,44 @@ class _ContinueReadingRow extends StatelessWidget {
                     style:
                         SereneType.uiBody.copyWith(color: colors.onSurfaceVariant),
                   ),
+                  const SizedBox(height: 8),
+                  _ProgressBar(progress: book.progress),
                 ],
               ),
             ),
           );
         },
+      ),
+    );
+  }
+}
+
+/// Slim progress bar shown under a Continue Reading card's title/author.
+class _ProgressBar extends StatelessWidget {
+  final double? progress;
+  const _ProgressBar({this.progress});
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).extension<SereneTheme>()!.colors;
+    final p = (progress ?? 0).clamp(0.0, 1.0);
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(3),
+      child: SizedBox(
+        height: 4,
+        child: Stack(
+          children: [
+            Container(
+              width: double.infinity,
+              color: colors.outlineVariant.withValues(alpha: 0.35),
+            ),
+            FractionallySizedBox(
+              alignment: Alignment.centerLeft,
+              widthFactor: p,
+              child: Container(color: colors.primary),
+            ),
+          ],
+        ),
       ),
     );
   }
