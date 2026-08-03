@@ -65,6 +65,15 @@ class _ReaderScreenState extends State<ReaderScreen> {
   Map<int, String> _highlights = {}; // global block index -> color hex
   _HighlightMenuState? _highlightMenu;
 
+  // Set when the scroll list should re-position itself to the current reading
+  // progress next time it builds (e.g. switching paginated -> scroll).
+  bool _restoreScrollOnShow = false;
+
+  // The exact block the reader is anchored on when switching modes. Captured
+  // at the moment of the switch so scroll & paginated views can both resolve to
+  // the same content instead of a fuzzy progress fraction that drifts a chapter.
+  int? _anchorBlock;
+
   // Annotations loaded from the backend, cached for the panel. Populated
   // lazily so the banner badge and the Highlights & Notes sheet can render
   // without a second network call.
@@ -133,6 +142,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
         _bookmarkId = bookmark;
         _loading = false;
       });
+      if (_settings.mode == ReaderMode.scroll && progress > 0) {
+        _restoreScrollOnShow = true;
+      }
       _maybeExtractPoll();
       _applySavedHighlights();
     } catch (e) {
@@ -175,7 +187,16 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   void _updateSettings(ReaderSettings next) {
-    setState(() => _settings = next);
+    final modeChanged = next.mode != _settings.mode;
+    if (modeChanged) {
+      // Capture which block is current *before* switching, so the new view can
+      // land on the same content (not a fuzzy fraction that drifts a chapter).
+      _anchorBlock = _captureAnchorBlock();
+    }
+    setState(() {
+      _settings = next;
+      if (next.mode == ReaderMode.scroll) _restoreScrollOnShow = true;
+    });
     _saveTimer?.cancel();
     _saveTimer = Timer(const Duration(milliseconds: 400), () {
       _settingsService.save(next);
@@ -466,6 +487,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   Widget _scrollView() {
     final blocks = _structured!.allBlocks;
+    if (_restoreScrollOnShow) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _restoreScrollPosition());
+      _restoreScrollOnShow = false;
+    }
     return NotificationListener<ScrollNotification>(
       onNotification: _onScroll,
       child: ListView.builder(
@@ -482,15 +507,105 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
+  /// Jump the scroll list to the exact block the reader was on (captured when
+  /// leaving paginated mode), so switching views keeps the same content rather
+  /// than drifting back a chapter. Falls back to a progress fraction when no
+  /// block anchor exists (e.g. opening fresh in scroll mode).
+  void _restoreScrollPosition() {
+    if (!_scrollController.hasClients) return;
+    final max = _scrollController.position.maxScrollExtent;
+    if (max <= 0) return;
+    final target = _scrollOffsetForBlock(_anchorBlock) ?? (_progress * max);
+    _scrollController.jumpTo(target.clamp(0.0, max));
+    _anchorBlock = null;
+  }
+
+  /// Build a table of the top offset of every reflowed block, measured the
+  /// same way the paginator measures them (TextPainter + the same bottom
+  /// padding as [_buildBlock]), so a block index maps deterministically to a
+  /// scroll pixel.
+  List<double> _blockOffsets(List<TextBlock> blocks, double width) {
+    final offsets = <double>[];
+    var y = 0.0;
+    for (final b in blocks) {
+      offsets.add(y);
+      final style = b.isHeading ? _headingStyle : _bodyStyle;
+      final tp = TextPainter(
+        text: TextSpan(text: b.text, style: style),
+        textDirection: TextDirection.ltr,
+      )..layout(maxWidth: width);
+      y += tp.height + (b.isHeading ? 12 : 20);
+      tp.dispose();
+    }
+    return offsets;
+  }
+
+  double _scrollContentWidth() =>
+      MediaQuery.sizeOf(context).width - 2 * _readingInset;
+
+  double? _scrollOffsetForBlock(int? blockIndex) {
+    final blocks = _structured?.allBlocks;
+    if (blockIndex == null || blocks == null || blockIndex >= blocks.length) {
+      return null;
+    }
+    final offsets = _blockOffsets(blocks, _scrollContentWidth());
+    final topPad = MediaQuery.sizeOf(context).height * 0.1;
+    return topPad + offsets[blockIndex];
+  }
+
+  /// The global block index currently at the top of the scroll viewport.
+  int? _topVisibleBlockInScroll() {
+    if (!_scrollController.hasClients) return null;
+    final blocks = _structured?.allBlocks;
+    if (blocks == null || blocks.isEmpty) return null;
+    final offsets = _blockOffsets(blocks, _scrollContentWidth());
+    final topPad = MediaQuery.sizeOf(context).height * 0.1;
+    final pixels = _scrollController.position.pixels - topPad + 2;
+    var index = 0;
+    for (var i = 0; i < offsets.length; i++) {
+      if (offsets[i] <= pixels) index = i;
+    }
+    return index;
+  }
+
+  /// Reads which block the *current* mode is showing, so we can re-anchor the
+  /// other mode to the same content on switch.
+  int? _captureAnchorBlock() {
+    if (_settings.mode == ReaderMode.paginated) {
+      final pages = _pages;
+      if (pages == null || pages.isEmpty) return null;
+      final pageIndex = (_currentPage - 1).clamp(0, pages.length - 1);
+      return pages[pageIndex].first.$2;
+    }
+    if (_settings.mode == ReaderMode.scroll) {
+      return _topVisibleBlockInScroll();
+    }
+    return null;
+  }
+
+  /// The page whose block range contains [blockIndex], else -1.
+  int _pageForBlock(int blockIndex, List<List<(TextBlock, int)>> pages) {
+    for (var pi = 0; pi < pages.length; pi++) {
+      final p = pages[pi];
+      if (blockIndex >= p.first.$2 && blockIndex <= p.last.$2) return pi;
+    }
+    return -1;
+  }
+
   Widget _paginatedView() {
     _ensurePaginated();
     final pages = _pages;
     if (pages == null || pages.isEmpty) {
       return const Center(child: CircularProgressIndicator());
     }
-    final initial = pages.length > 1
-        ? (_progress * (pages.length - 1)).round().clamp(0, pages.length - 1)
-        : 0;
+    // Land on the block the reader was on before switching (e.g. scroll ->
+    // paginated). Fall back to the progress fraction.
+    var initial = pages.length > 1 ? (_progress * (pages.length - 1)).round().clamp(0, pages.length - 1) : 0;
+    if (_anchorBlock != null) {
+      final byBlock = _pageForBlock(_anchorBlock!, pages);
+      if (byBlock >= 0) initial = byBlock;
+      _anchorBlock = null;
+    }
     return _SinglePageView(
       key: ValueKey('book-${_pagesKey ?? ''}'),
       pages: pages,
@@ -1937,65 +2052,70 @@ class _SeekBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final f = fraction.clamp(0.0, 1.0);
-    return GestureDetector(
-      behavior: HitTestBehavior.translucent,
-      onTapDown: (d) => onSeek(_fractionFromX(context, d.localPosition.dx)),
-      onHorizontalDragUpdate: (d) =>
-          onSeek(_fractionFromX(context, d.localPosition.dx)),
-      child: SizedBox(
-        height: 28,
-        child: Center(
-          child: Stack(
-            alignment: Alignment.centerLeft,
-            children: [
-              Container(
-                height: 6,
-                width: double.infinity,
-                decoration: BoxDecoration(
-                  color: track,
-                  borderRadius: BorderRadius.circular(3),
-                ),
-              ),
-              FractionallySizedBox(
-                widthFactor: f,
-                child: Container(
-                  height: 6,
-                  decoration: BoxDecoration(
-                    color: fill,
-                    borderRadius: BorderRadius.circular(3),
+    // Compute the fraction from the real bar width (LayoutBuilder), not the
+    // whole screen -- the footer squeezes the bar between a percent label and
+    // a page-count label, so using screen width makes taps/drags drift and
+    // never reach 100%.
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final barWidth = constraints.maxWidth;
+        double fractionFromDx(double dx) =>
+            barWidth <= 0 ? 0 : (dx / barWidth).clamp(0.0, 1.0);
+        return GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTapDown: (d) => onSeek(fractionFromDx(d.localPosition.dx)),
+          onHorizontalDragUpdate: (d) =>
+              onSeek(fractionFromDx(d.localPosition.dx)),
+          child: SizedBox(
+            height: 28,
+            child: Center(
+              child: Stack(
+                alignment: Alignment.centerLeft,
+                children: [
+                  Container(
+                    height: 6,
+                    width: double.infinity,
+                    decoration: BoxDecoration(
+                      color: track,
+                      borderRadius: BorderRadius.circular(3),
+                    ),
                   ),
-                ),
-              ),
-              FractionallySizedBox(
-                widthFactor: f == 0 ? 0.001 : f,
-                alignment: Alignment.centerRight,
-                child: Container(
-                  width: 18,
-                  height: 18,
-                  decoration: BoxDecoration(
-                    color: fill,
-                    shape: BoxShape.circle,
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.25),
-                        blurRadius: 4,
-                        offset: const Offset(0, 1),
+                  FractionallySizedBox(
+                    widthFactor: f,
+                    child: Container(
+                      height: 6,
+                      decoration: BoxDecoration(
+                        color: fill,
+                        borderRadius: BorderRadius.circular(3),
                       ),
-                    ],
+                    ),
                   ),
-                ),
+                  FractionallySizedBox(
+                    widthFactor: f == 0 ? 0.001 : f,
+                    alignment: Alignment.centerRight,
+                    child: Container(
+                      width: 18,
+                      height: 18,
+                      decoration: BoxDecoration(
+                        color: fill,
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.25),
+                            blurRadius: 4,
+                            offset: const Offset(0, 1),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
-  }
-
-  double _fractionFromX(BuildContext context, double dx) {
-    final width = MediaQuery.sizeOf(context).width - 32 - 24;
-    if (width <= 0) return 0;
-    return (dx / width).clamp(0.0, 1.0);
   }
 }
 
