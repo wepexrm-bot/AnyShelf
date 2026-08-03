@@ -23,6 +23,8 @@ def send_email(to: str, subject: str, html: str) -> bool:
     """Send an HTML email. Returns True if sent (or queued in dev)."""
     if settings.resend_api_key:
         return _send_via_resend_api(to, subject, html)
+    if settings.brevo_api_key:
+        return _send_via_brevo_api(to, subject, html)
     return _send_via_smtp(to, subject, html)
 
 
@@ -65,6 +67,56 @@ def _send_via_resend_api(to: str, subject: str, html: str) -> bool:
     except Exception as exc:
         logger.error("Failed to send email via Resend API to %s: %s", to, exc)
         return False
+
+
+def _send_via_brevo_api(to: str, subject: str, html: str) -> bool:
+    sender = settings.smtp_from or f"Anyshelf <{to}>"
+    payload = {
+        "sender": _parse_address(sender),
+        "to": [_parse_address(to)],
+        "subject": subject,
+        "htmlContent": html,
+    }
+    req = urllib.request.Request(
+        "https://api.brevo.com/v3/smtp/email",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "api-key": settings.brevo_api_key,
+            "Content-Type": "application/json",
+            "User-Agent": "anyshelf-backend/1.0",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            if resp.status not in (200, 201):
+                logger.error(
+                    "Brevo API returned %s for %s: %s",
+                    resp.status,
+                    to,
+                    resp.read().decode("utf-8", "replace"),
+                )
+                return False
+            return True
+    except urllib.error.HTTPError as exc:
+        logger.error(
+            "Brevo API HTTP %s for %s: %s",
+            exc.code,
+            to,
+            exc.read().decode("utf-8", "replace"),
+        )
+        return False
+    except Exception as exc:
+        logger.error("Failed to send email via Brevo API to %s: %s", to, exc)
+        return False
+
+
+def _parse_address(addr: str) -> dict:
+    import email.utils
+
+    name, email = email.utils.parseaddr(addr)
+    return {"name": name or "", "email": email}
 
 
 def _send_via_smtp(to: str, subject: str, html: str) -> bool:
