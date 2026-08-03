@@ -23,7 +23,7 @@ _s3 = boto3.client(
     aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY") or None,
     config=Config(signature_version="s3v4"),
 )
-logger.info(
+logger.warning(
     "S3 client initialized: bucket=%s region=%s endpoint=%s creds=%s",
     settings.s3_bucket,
     settings.s3_region,
