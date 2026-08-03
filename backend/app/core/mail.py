@@ -1,12 +1,15 @@
 """Email delivery for verification / password-reset links.
 
-In development (no SMTP configured) links are logged and returned by the
-auth routes so the flow works end to end. When `settings.smtp_host` is set,
-email is sent via SMTP instead.
+In development (no SMTP/Resend configured) links are logged and returned by
+the auth routes so the flow works end to end. When `settings.resend_api_key`
+is set, email is sent via the Resend HTTP API (reliable on cloud hosts that
+block outbound SMTP). Otherwise plain SMTP is used as a fallback.
 """
 
+import json
 import logging
 import smtplib
+import urllib.request
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -17,6 +20,44 @@ logger = logging.getLogger("Anyshelf.mail")
 
 def send_email(to: str, subject: str, html: str) -> bool:
     """Send an HTML email. Returns True if sent (or queued in dev)."""
+    if settings.resend_api_key:
+        return _send_via_resend_api(to, subject, html)
+    return _send_via_smtp(to, subject, html)
+
+
+def _send_via_resend_api(to: str, subject: str, html: str) -> bool:
+    payload = {
+        "from": settings.smtp_from,
+        "to": [to],
+        "subject": subject,
+        "html": html,
+    }
+    req = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {settings.resend_api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            if resp.status != 200:
+                logger.error(
+                    "Resend API returned %s for %s: %s",
+                    resp.status,
+                    to,
+                    resp.read().decode("utf-8", "replace"),
+                )
+                return False
+            return True
+    except Exception as exc:
+        logger.error("Failed to send email via Resend API to %s: %s", to, exc)
+        return False
+
+
+def _send_via_smtp(to: str, subject: str, html: str) -> bool:
     if not settings.smtp_host:
         # Dev mode: log the content so it's visible in the console.
         logger.info("EMAIL(to=%s) subject=%s\n%s", to, subject, html)

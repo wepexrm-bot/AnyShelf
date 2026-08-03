@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     email_verification_link_ttl_minutes: int = 60
     password_reset_link_ttl_minutes: int = 30
 
+    # Resend HTTP API (preferred over SMTP on cloud hosts that block port 587).
+    resend_api_key: str | None = None
+
     # OCR
     ocr_confidence_threshold: float = 0.65  # below this, fall back to fixed-layout mode
     use_cloud_ocr: bool = False  # False = Tesseract locally, True = cloud OCR API
@@ -40,6 +43,7 @@ class Settings(BaseSettings):
         "smtp_host",
         "smtp_user",
         "smtp_password",
+        "resend_api_key",
         mode="before",
     )
     @classmethod
