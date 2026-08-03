@@ -5,14 +5,30 @@ client device, which is what lets users open a PDF "from anywhere" without
 needing local storage of the full file.
 """
 
+import logging
+import os
+
 import boto3
+from botocore.config import Config
 
 from app.config import settings
+
+logger = logging.getLogger("Anyshelf.storage")
 
 _s3 = boto3.client(
     "s3",
     region_name=settings.s3_region,
     endpoint_url=settings.s3_endpoint_url,  # None -> real AWS S3; set for local MinIO
+    aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID") or None,
+    aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY") or None,
+    config=Config(signature_version="s3v4"),
+)
+logger.info(
+    "S3 client initialized: bucket=%s region=%s endpoint=%s creds=%s",
+    settings.s3_bucket,
+    settings.s3_region,
+    settings.s3_endpoint_url,
+    "set" if (os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_SECRET_ACCESS_KEY")) else "MISSING",
 )
 
 
