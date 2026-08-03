@@ -19,7 +19,7 @@ router = APIRouter()
 logger = logging.getLogger("Anyshelf.auth")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-FRONTEND_BASE = "http://localhost:3000"
+FRONTEND_BASE = settings.frontend_base
 
 
 def generate_verification_code() -> str:

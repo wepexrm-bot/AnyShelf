@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     email_verification_link_ttl_minutes: int = 60
     password_reset_link_ttl_minutes: int = 30
 
+    # Frontend base URL used to build password-reset links.
+    frontend_base: str = "https://anyshelf.onrender.com"
+
     # Resend HTTP API (preferred over SMTP on cloud hosts that block port 587).
     resend_api_key: str | None = None
 
