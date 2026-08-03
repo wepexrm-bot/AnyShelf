@@ -15,12 +15,15 @@ from app.config import settings
 
 logger = logging.getLogger("Anyshelf.storage")
 
+_r2_access = os.environ.get("R2_ACCESS_KEY_ID") or os.environ.get("AWS_ACCESS_KEY_ID") or None
+_r2_secret = os.environ.get("R2_SECRET_ACCESS_KEY") or os.environ.get("AWS_SECRET_ACCESS_KEY") or None
+
 _s3 = boto3.client(
     "s3",
     region_name=settings.s3_region,
     endpoint_url=settings.s3_endpoint_url,  # None -> real AWS S3; set for local MinIO
-    aws_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID") or None,
-    aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY") or None,
+    aws_access_key_id=_r2_access,
+    aws_secret_access_key=_r2_secret,
     config=Config(signature_version="s3v4"),
 )
 logger.warning(
@@ -28,7 +31,7 @@ logger.warning(
     settings.s3_bucket,
     settings.s3_region,
     settings.s3_endpoint_url,
-    "set" if (os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_SECRET_ACCESS_KEY")) else "MISSING",
+    "set" if (_r2_access and _r2_secret) else "MISSING",
 )
 
 
