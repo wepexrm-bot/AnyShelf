@@ -39,6 +39,7 @@ def _send_via_resend_api(to: str, subject: str, html: str) -> bool:
         headers={
             "Authorization": f"Bearer {settings.resend_api_key}",
             "Content-Type": "application/json",
+            "User-Agent": "anyshelf-backend/1.0",
         },
         method="POST",
     )
