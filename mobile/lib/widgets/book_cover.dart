@@ -67,21 +67,33 @@ class BookCover extends StatelessWidget {
 
   Widget _placeholder(ColorScheme scheme) => ColoredBox(
         color: scheme.surfaceContainerLow,
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.menu_book, size: 40, color: scheme.outlineVariant),
-            const SizedBox(height: 8),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              child: Text(
-                'PDF Document',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: SereneType.labelMd.copyWith(color: scheme.outlineVariant),
-              ),
-            ),
-          ],
+        child: LayoutBuilder(
+          builder: (context, c) {
+            // The "Recently Added" row shows tiny covers, so shrink the icon and
+            // drop the text label rather than overflowing the 2:3 box.
+            final compact = c.maxHeight < 80;
+            final iconSize = compact ? 22.0 : 40.0;
+            final label = compact
+                ? const SizedBox.shrink()
+                : Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: Text(
+                      'PDF Document',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: SereneType.labelMd
+                          .copyWith(color: scheme.outlineVariant),
+                    ),
+                  );
+            return Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.menu_book, size: iconSize, color: scheme.outlineVariant),
+                if (!compact) const SizedBox(height: 8),
+                label,
+              ],
+            );
+          },
         ),
       );
 }
