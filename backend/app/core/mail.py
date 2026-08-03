@@ -9,6 +9,7 @@ block outbound SMTP). Otherwise plain SMTP is used as a fallback.
 import json
 import logging
 import smtplib
+import urllib.error
 import urllib.request
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -52,6 +53,14 @@ def _send_via_resend_api(to: str, subject: str, html: str) -> bool:
                 )
                 return False
             return True
+    except urllib.error.HTTPError as exc:
+        logger.error(
+            "Resend API HTTP %s for %s: %s",
+            exc.code,
+            to,
+            exc.read().decode("utf-8", "replace"),
+        )
+        return False
     except Exception as exc:
         logger.error("Failed to send email via Resend API to %s: %s", to, exc)
         return False
