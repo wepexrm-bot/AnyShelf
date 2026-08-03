@@ -5,9 +5,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:syncfusion_flutter_core/theme.dart';
-import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart';
+import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart'
+    hide Annotation;
 
 import '../models/book.dart';
+import '../models/annotation.dart';
 import '../models/reader_settings.dart';
 import '../services/books_service.dart';
 import '../services/settings_service.dart';
@@ -38,12 +40,20 @@ class _ReaderScreenState extends State<ReaderScreen> {
   late ReaderSettings _settings = ReaderSettings.defaults();
   StructuredText? _structured;
   String? _pdfUrl; // resolved from GET /books/{id} (list omits pdf_url)
+  double? _reflowConfidence; // from GET /books/{id}; may lag the list snapshot
   bool _uiVisible = false;
   bool _bookmarked = false;
   String? _bookmarkId; // backend annotation id of the current bookmark, if any
   bool _loading = true;
   String? _error;
   Timer? _saveTimer;
+
+  // Text-extraction status: while a freshly uploaded book is still being
+  // processed the structured text isn't ready, so we show a looping extraction
+  // animation and poll until the backend reports "done".
+  String? _extractionStatus;
+  double? _extractionProgress;
+  Timer? _extractionTimer;
 
   // cached, time-sliced pagination state
   List<List<(TextBlock, int)>>? _pages;
@@ -55,6 +65,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
   Map<int, String> _highlights = {}; // global block index -> color hex
   _HighlightMenuState? _highlightMenu;
 
+  // Annotations loaded from the backend, cached for the panel. Populated
+  // lazily so the banner badge and the Highlights & Notes sheet can render
+  // without a second network call.
+  List<Annotation>? _annotations;
+
   // page tracking for the footer (paginated mode)
   int _currentPage = 0;
   int _pageCount = 0;
@@ -63,7 +78,20 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   double get _progress => _progressNotifier.value;
 
-  bool get _reflowAvailable => widget.book.reflowAvailable && _structured != null;
+  // Reflow (and thus pagination) is available when the structured text loaded
+  // and the book's reflow confidence is high enough. Prefer the fresh value
+  // from GET /books/{id}: the list snapshot can be stale (extraction was still
+  // running when the card was fetched, so its confidence was null).
+  bool get _reflowAvailable =>
+      (_reflowConfidence ?? widget.book.reflowConfidence ?? 0) >= 0.5 &&
+      _structured != null;
+
+  /// True while the book's text is still being extracted and structured data
+  /// isn't ready yet. Drives the looping extraction animation.
+  bool get _isExtracting =>
+      _structured == null &&
+      _extractionStatus != 'done' &&
+      _extractionStatus != 'failed';
 
   @override
   void initState() {
@@ -75,6 +103,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   void dispose() {
     _saveTimer?.cancel();
     _paginateTimer?.cancel();
+    _extractionTimer?.cancel();
     _scrollController.dispose();
     _progressNotifier.dispose();
     super.dispose();
@@ -96,18 +125,52 @@ class _ReaderScreenState extends State<ReaderScreen> {
       setState(() {
         _settings = settings;
         _structured = structured;
+        _reflowConfidence = detail.reflowConfidence;
+        _extractionStatus = detail.extractionStatus;
         _pdfUrl = detail.pdfUrl;
         _progressNotifier.value = progress;
         _bookmarked = bookmark != null;
         _bookmarkId = bookmark;
         _loading = false;
       });
+      _maybeExtractPoll();
+      _applySavedHighlights();
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _error = '$e';
         _loading = false;
       });
+    }
+  }
+
+  /// Starts a background poll for a book whose structured text isn't ready
+  /// yet (extraction still running on the backend). The looping extraction
+  /// animation shows until the poll reports "done", then we reload to pull
+  /// the now-available structured text.
+  void _maybeExtractPoll() {
+    if (_structured != null) return;
+    if (_extractionStatus == 'done' || _extractionStatus == 'failed') return;
+    _extractionTimer?.cancel();
+    _extractionTimer = Timer.periodic(const Duration(seconds: 2), (_) => _pollExtraction());
+  }
+
+  Future<void> _pollExtraction() async {
+    try {
+      final r = await _booksService.extractionStatus(widget.book.id);
+      if (!mounted) return;
+      setState(() {
+        _extractionStatus = r.status;
+        _extractionProgress = r.progress;
+      });
+      if (r.status == 'done') {
+        _extractionTimer?.cancel();
+        await _load();
+      } else if (r.status == 'failed') {
+        _extractionTimer?.cancel();
+      }
+    } catch (_) {
+      // Transient poll error (backend between reloads etc.) -- keep polling.
     }
   }
 
@@ -155,6 +218,70 @@ class _ReaderScreenState extends State<ReaderScreen> {
       }
     } catch (_) {
       setState(() => _bookmarked = false);
+    }
+  }
+
+  /// Reconcile saved annotations (user highlights + imported PDF highlights)
+  /// against the reflowed blocks so they render in both scroll and paginated
+  /// modes without requiring the user to re-select them.
+  Future<void> _applySavedHighlights() async {
+    final anns = await _loadAnnotations();
+    if (anns.isEmpty) return;
+    final blocks = _structured?.allBlocks;
+    if (blocks == null || blocks.isEmpty) return;
+    final merged = Map<int, String>.from(_highlights);
+    for (final a in anns) {
+      if (a.kind != 'highlight') continue;
+      final text = a.anchoredText;
+      if (text == null || text.isEmpty) continue;
+      for (var i = 0; i < blocks.length; i++) {
+        if (blocks[i].text.contains(text)) {
+          merged[i] = a.color ?? (a.importedFromPdf ? '#8BC34A' : '#FFD54F');
+          break;
+        }
+      }
+    }
+    if (!mounted) return;
+    setState(() => _highlights = merged);
+  }
+
+  Future<List<Annotation>> _loadAnnotations() async {
+    if (_annotations != null) return _annotations!;
+    try {
+      _annotations = await _booksService.annotations(widget.book.id);
+    } catch (_) {
+      _annotations = const [];
+    }
+    return _annotations!;
+  }
+
+  Future<void> _openAnnotations() async {
+    final anns = await _loadAnnotations();
+    if (!mounted) return;
+    final blocks = _structured?.allBlocks ?? [];
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _AnnotationsSheet(
+        annotations: anns,
+        blocks: blocks,
+        atmosphere: _settings.atmosphere,
+        onTapHighlight: (String text) => _scrollToAnnotatedText(text, blocks),
+      ),
+    );
+  }
+
+  void _scrollToAnnotatedText(String text, List<TextBlock> blocks) {
+    if (blocks.isEmpty) return;
+    for (var i = 0; i < blocks.length; i++) {
+      if (blocks[i].text.contains(text)) {
+        final progress = blocks.length > 1 ? i / (blocks.length - 1) : 0.0;
+        _updateProgress(progress);
+        _scrollToProgress(progress);
+        return;
+      }
     }
   }
 
@@ -276,12 +403,39 @@ class _ReaderScreenState extends State<ReaderScreen> {
   // ---------------------------------------------------------------- surface
 
   Widget _readingSurface() {
-    if (!_reflowAvailable) {
-      return _fixedPdfView();
-    }
+    if (_isExtracting) return _extractionView();
+    if (!_reflowAvailable) return _fixedPdfView();
     return _settings.mode == ReaderMode.scroll
         ? _scrollView()
         : _paginatedView();
+  }
+
+  /// Looping circular extraction animation shown while the backend is still
+  /// processing the book's text. Renders the reader the moment it completes.
+  Widget _extractionView() {
+    final progress = (_extractionProgress ?? 0).clamp(0, 100).toInt();
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 72,
+            height: 72,
+            child: CircularProgressIndicator(
+              value: null, // indeterminate -- spins until extraction completes
+              strokeWidth: 6,
+              color: _settings.atmosphere.accent,
+              backgroundColor: _settings.atmosphere.text.withValues(alpha: 0.08),
+            ),
+          ),
+          const SizedBox(height: 20),
+          Text(
+            progress > 0 ? 'Extracting text… $progress%' : 'Extracting text…',
+            style: SereneType.uiBody.copyWith(color: _settings.atmosphere.text),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _fixedPdfView() {
@@ -747,6 +901,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
               onAppearance: _openAppearance,
               onSearch: _openSearch,
               onToggleBookmark: _toggleBookmark,
+              onAnnotations: _openAnnotations,
+              annotationCount: _annotations?.length ?? 0,
+              importCount:
+                  (_annotations?.where((a) => a.importedFromPdf).length ?? 0),
               onTts: () {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(content: Text('Text-to-speech coming soon')),
@@ -996,6 +1154,9 @@ class _ReaderFooter extends StatelessWidget {
   final VoidCallback onSearch;
   final VoidCallback onToggleBookmark;
   final VoidCallback onTts;
+  final VoidCallback onAnnotations;
+  final int annotationCount;
+  final int importCount;
   const _ReaderFooter({
     required this.progress,
     required this.pageCount,
@@ -1008,6 +1169,9 @@ class _ReaderFooter extends StatelessWidget {
     required this.onSearch,
     required this.onToggleBookmark,
     required this.onTts,
+    required this.onAnnotations,
+    this.annotationCount = 0,
+    this.importCount = 0,
   });
 
   @override
@@ -1070,6 +1234,13 @@ class _ReaderFooter extends StatelessWidget {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
+                _FooterAction(
+                  icon: Icons.format_quote,
+                  color: text,
+                  onTap: onAnnotations,
+                  tooltip: 'Highlights &amp; Notes',
+                  badge: importCount > 0 ? '$importCount' : null,
+                ),
                 _FooterAction(
                   icon: Icons.font_download,
                   color: text,
@@ -1722,18 +1893,27 @@ class _FooterAction extends StatelessWidget {
   final Color color;
   final VoidCallback onTap;
   final String tooltip;
+  final String? badge;
   const _FooterAction({
     required this.icon,
     required this.color,
     required this.onTap,
     required this.tooltip,
+    this.badge,
   });
 
   @override
   Widget build(BuildContext context) {
+    final child = Icon(icon, size: 28, color: color);
     return IconButton(
       onPressed: onTap,
-      icon: Icon(icon, size: 28, color: color),
+      icon: badge != null
+          ? Badge(
+              label: Text(badge!, style: const TextStyle(fontSize: 10)),
+              backgroundColor: color.withValues(alpha: 0.25),
+              child: child,
+            )
+          : child,
       tooltip: tooltip,
       padding: const EdgeInsets.all(10),
     );
@@ -1816,6 +1996,244 @@ class _SeekBar extends StatelessWidget {
     final width = MediaQuery.sizeOf(context).width - 32 - 24;
     if (width <= 0) return 0;
     return (dx / width).clamp(0.0, 1.0);
+  }
+}
+
+/// The "Highlights &amp; Notes" sheet shown from the reader footer. Lists every
+/// annotation on the book -- reader-created highlights/notes and native PDF
+/// annotations imported at extraction time (badged "Imported from PDF").
+/// Tapping a highlight jumps to its place in the reflowed text.
+class _AnnotationsSheet extends StatelessWidget {
+  final List<Annotation> annotations;
+  final List<TextBlock> blocks;
+  final ReadingAtmosphere atmosphere;
+  final ValueChanged<String> onTapHighlight;
+
+  const _AnnotationsSheet({
+    required this.annotations,
+    required this.blocks,
+    required this.atmosphere,
+    required this.onTapHighlight,
+  });
+
+  static Color _parseColor(String? hex, Color fallback) {
+    if (hex == null) return fallback;
+    final cleaned = hex.replaceFirst('#', '');
+    if (cleaned.length != 6) return fallback;
+    final v = int.tryParse(cleaned, radix: 16);
+    if (v == null) return fallback;
+    return Color(0xFF000000 | v);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = atmosphere.background;
+    final text = atmosphere.text;
+    final muted = text.withValues(alpha: 0.7);
+    final hint = text.withValues(alpha: 0.45);
+
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.sizeOf(context).height * 0.85,
+      ),
+      child: Container(
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: SereneShape.sheetTop,
+        ),
+        child: SafeArea(
+          top: false,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  margin: const EdgeInsets.only(top: 10),
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: text.withValues(alpha: 0.2),
+                    borderRadius: SereneShape.fullPill,
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 14, 20, 8),
+                child: Text('Highlights &amp; Notes',
+                    style: SereneType.title.copyWith(color: text)),
+              ),
+              if (annotations.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 10, 20, 28),
+                  child: Text(
+                    'No highlights or notes yet. Highlight a passage to add '
+                    'one, or open this book in a PDF reader to import its '
+                    'annotations.',
+                    style: SereneType.uiBody.copyWith(color: muted),
+                  ),
+                )
+              else
+                Flexible(
+                  child: ListView.separated(
+                    shrinkWrap: true,
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                    itemCount: annotations.length,
+                    separatorBuilder: (_, __) =>
+                        SizedBox(height: 8),
+                    itemBuilder: (context, i) => _AnnotationTile(
+                      annotation: annotations[i],
+                      text: text,
+                      muted: muted,
+                      hint: hint,
+                      accent: atmosphere.accent,
+                      canTap: blocks.isNotEmpty,
+                      onTap: annotations[i].kind == 'highlight'
+                          ? () {
+                              final t = annotations[i].anchoredText;
+                              if (t != null && t.isNotEmpty) {
+                                Navigator.of(context).pop();
+                                onTapHighlight(t);
+                              }
+                            }
+                          : null,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A single annotation in the Highlights &amp; Notes sheet: colored marker,
+/// the quoted text or the note body, and an "Imported from PDF" badge when the
+/// annotation came from the original document rather than the reader.
+class _AnnotationTile extends StatelessWidget {
+  final Annotation annotation;
+  final Color text;
+  final Color muted;
+  final Color hint;
+  final Color accent;
+  final bool canTap;
+  final VoidCallback? onTap;
+
+  const _AnnotationTile({
+    required this.annotation,
+    required this.text,
+    required this.muted,
+    required this.hint,
+    required this.accent,
+    required this.canTap,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final kind = annotation.kind;
+    final isHighlight = kind == 'highlight';
+    final color = _AnnotationsSheet._parseColor(
+      annotation.color,
+      accent,
+    );
+    final body = isHighlight
+        ? (annotation.anchoredText ?? '')
+        : (annotation.noteText ?? '');
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.all(SereneShape.md),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            color: text.withValues(alpha: 0.04),
+            borderRadius: BorderRadius.all(SereneShape.md),
+            border: Border.all(color: text.withValues(alpha: 0.08)),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Icon(
+                  isHighlight ? Icons.format_quote : Icons.sticky_note_2_outlined,
+                  size: 18,
+                  color: color,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (body.trim().isNotEmpty)
+                      Text(
+                        body.trim(),
+                        maxLines: 4,
+                        overflow: TextOverflow.ellipsis,
+                        style: SereneType.readingBody.copyWith(
+                          color: text,
+                          fontSize: 15,
+                          height: 20 / 15,
+                        ),
+                      )
+                    else
+                      Text(
+                        annotation.importedFromPdf
+                            ? 'Imported PDF note (no matched text)'
+                            : 'Empty ${isHighlight ? 'highlight' : 'note'}',
+                        style: SereneType.uiBody.copyWith(
+                          color: hint,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      ),
+                    if (annotation.importedFromPdf)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: _AnnotationsSheet._parseColor(
+                              '#8BC34A',
+                              accent,
+                            ).withValues(alpha: 0.18),
+                            borderRadius: SereneShape.fullPill,
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.import_export,
+                                  size: 12,
+                                  color: _AnnotationsSheet._parseColor(
+                                      '#8BC34A', accent)),
+                              const SizedBox(width: 4),
+                              Text(
+                                'Imported from PDF',
+                                style: SereneType.labelSm.copyWith(
+                                  color: text.withValues(alpha: 0.8),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              if (canTap && isHighlight)
+                Icon(Icons.chevron_right, size: 18, color: hint),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 

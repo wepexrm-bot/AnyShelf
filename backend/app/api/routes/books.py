@@ -86,6 +86,31 @@ async def upload_book(
     }
 
 
+def _import_pdf_native_annotations(db: Session, book: Book, annotations: list[dict]):
+    """Replace the book's previously-imported native annotations with a fresh
+    set, storing each as an Annotation row anchored by its matched text."""
+    if not annotations:
+        return
+    db.query(Annotation).filter(
+        Annotation.book_id == book.id,
+        Annotation.source == "pdf_native",
+    ).delete(synchronize_session=False)
+
+    for ann in annotations:
+        db.add(
+            Annotation(
+                user_id=book.owner_id,
+                book_id=book.id,
+                kind=ann["kind"] if ann["kind"] in ("highlight", "note") else "highlight",
+                source="pdf_native",
+                anchor=json.dumps(ann["anchor"], ensure_ascii=False),
+                page=ann["page"],
+                color=ann["color"],
+                note_text=ann["note"],
+            )
+        )
+
+
 def process_extraction(book_id: str, local_pdf_path: str):
     """Run extraction in the background.
 
@@ -121,6 +146,12 @@ def process_extraction(book_id: str, local_pdf_path: str):
         book.is_scanned = result["is_scanned"]
         book.page_count = len(result["pages"])
         book.extraction_status = "done"
+
+        # Import native PDF annotations (highlights / margin notes) as
+        # text-anchored rows owned by the book's owner. Re-running the job
+        # replaces the previous import, never duplicating.
+        _import_pdf_native_annotations(db, book, result.get("imported_annotations", []))
+
         db.commit()
         _extraction_progress.pop(book_id, None)
     except Exception as exc:

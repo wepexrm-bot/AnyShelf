@@ -18,8 +18,6 @@ def run_pipeline(pdf_path: str, progress_cb=None) -> dict:
     stage so callers can surface live 0-100% progress to the user.
     """
 
-    import fitz
-
     from app.core.extraction.extractor import extract_spans, get_pdf_outline
     from app.core.extraction.ocr import ocr_page
     from app.core.extraction.reading_order import order_reading_sequence
@@ -31,45 +29,48 @@ def run_pipeline(pdf_path: str, progress_cb=None) -> dict:
         score_reflow_confidence,
         StructuredPage,
     )
+    from app.core.extraction.annotations import reconcile_native_annotations
 
     def report(fraction: float):
         if progress_cb:
             progress_cb(fraction)
 
-    doc = fitz.open(pdf_path)
-    page_widths = [page.rect.width for page in doc]
-    page_heights = [page.rect.height for page in doc]
-    doc.close()
     report(0.05)
-
-    total_pages = max(len(page_widths), 1)
 
     pages = extract_spans(pdf_path, progress_cb=lambda f: report(0.05 + 0.20 * f))
     outline = get_pdf_outline(pdf_path)
     report(0.28)
 
+    total_pages = max(len(pages), 1)
+
     # Group spans into lines per page first, so we can drop running
     # headers/footers and page numbers (repeated noise) before reconstructing
-    # paragraphs.
+    # paragraphs. After two-up splitting, pages are logical book pages; their
+    # pdf_page_index still points at the physical PDF page for OCR.
     lines_by_page: list[list[Line]] = []
     scanned_page_count = 0
+    # Reading-order span sequence per logical page, kept for reconciling the
+    # job's native PDF annotations against the text they cover.
+    ordered_spans_by_page: dict[int, list] = {}
 
-    for page in pages:
+    for page_index, page in enumerate(pages):
         spans = page.spans
 
         if not page.has_text_layer:
             scanned_page_count += 1
-            ocr_spans, ocr_confidence = ocr_page(pdf_path, page.page_number)
+            ocr_spans, ocr_confidence = ocr_page(pdf_path, page.pdf_page_index)
             spans = ocr_spans
             if ocr_confidence < settings.ocr_confidence_threshold:
                 # Very low-confidence OCR: still record what we found, but
                 # this page will drag the overall reflow score down below.
                 pass
 
-        ordered = order_reading_sequence(spans, page_widths[page.page_number])
+        ordered = order_reading_sequence(spans, page.page_width)
+        ordered_spans_by_page[page.page_number] = ordered
         lines_by_page.append(group_into_lines(ordered))
-        report(0.30 + 0.62 * ((page.page_number + 1) / total_pages))
+        report(0.30 + 0.62 * ((page_index + 1) / total_pages))
 
+    page_heights = [p.page_height for p in pages]
     lines_by_page = filter_running_noise(lines_by_page, page_heights)
     report(0.94)
 
@@ -82,11 +83,14 @@ def run_pipeline(pdf_path: str, progress_cb=None) -> dict:
     confidence = score_reflow_confidence(structured_pages, scanned_ratio, outline=outline)
     report(0.98)
 
+    imported_annotations = reconcile_native_annotations(pages, ordered_spans_by_page)
+
     result = {
         "outline": outline,
         "reflow_confidence": confidence,
         "is_scanned": scanned_ratio > 0.5,
         "reflow_mode_recommended": confidence >= 0.5,
+        "imported_annotations": imported_annotations,
         "pages": [
             {
                 "page_number": p.page_number,

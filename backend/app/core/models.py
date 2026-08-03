@@ -103,7 +103,19 @@ class Annotation(Base):
     user_id = Column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=False)
     book_id = Column(UUID(as_uuid=False), ForeignKey("books.id"), nullable=False)
     kind = Column(Enum("highlight", "note", "bookmark", name="annotation_kind"))
+    # Where the annotation came from: reader gesture or a native PDF annotation
+    # imported during extraction.
+    source = Column(
+        Enum("user_created", "pdf_native", name="annotation_source"),
+        default="user_created",
+        nullable=False,
+    )
     anchor = Column(Text)  # serialized position (page + char range, or reflow offset)
+    # For pdf_native annotations the anchor is a JSON object of
+    # {"text","context_before","context_after","page"}; `page` is kept here too
+    # as a plain tiebreaker (closest logical page) when identical text appears
+    # in several places.
+    page = Column(Integer, nullable=True)
     color = Column(String, nullable=True)
     note_text = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

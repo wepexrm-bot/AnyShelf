@@ -101,6 +101,17 @@ class BooksService {
         createdAt: b.createdAt,
       );
 
+  /// Live text-extraction progress for a book that is still processing.
+  /// Returns `(status, progress)` where status is one of
+  /// `pending` / `processing` / `done` / `failed` and progress is 0-100.
+  Future<({String status, double progress})> extractionStatus(String bookId) async {
+    final data = await api.get('/books/$bookId/progress') as Map<String, dynamic>;
+    return (
+      status: (data['extraction_status'] as String?) ?? '',
+      progress: (data['progress'] as num?)?.toDouble() ?? 0,
+    );
+  }
+
   /// Reading position for a book (fraction 0..1 across the whole document).
   Future<double> progress(String bookId) async {
     final data = await api.get('/sync/progress/$bookId') as Map;

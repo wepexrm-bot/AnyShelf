@@ -168,13 +168,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       child: CustomScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
         slivers: [
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
-            sliver: SliverToBoxAdapter(
-              child: Text('Library',
-                  style: SereneType.headlineMobile.copyWith(color: colors.onSurface)),
-            ),
-          ),
+          const SliverToBoxAdapter(child: SizedBox(height: 24)),
           if (continuing.isNotEmpty) ...[
             const SliverPadding(padding: EdgeInsets.only(top: 24)),
             SliverToBoxAdapter(

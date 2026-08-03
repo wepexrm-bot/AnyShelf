@@ -88,6 +88,8 @@ def list_annotations(book_id: str, user: User = Depends(get_current_user), db: S
             "anchor": a.anchor,
             "color": a.color,
             "note_text": a.note_text,
+            "source": a.source,
+            "page": a.page,
         }
         for a in annotations
     ]

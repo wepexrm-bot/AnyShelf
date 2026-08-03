@@ -31,7 +31,6 @@ class _BooksScreenState extends State<BooksScreen> {
   bool _loading = true;
   String? _error;
 
-  String _query = '';
   String _genre = '';
   _BooksSort _sort = _BooksSort.newest;
 
@@ -84,12 +83,7 @@ class _BooksScreenState extends State<BooksScreen> {
   }
 
   List<Book> get _filtered {
-    final q = _query.trim().toLowerCase();
-    final tokens = q.split(RegExp(r'\s+')).where((t) => t.isNotEmpty).toList();
     final filtered = _books.where((b) {
-      final haystack =
-          '${b.title} ${b.author ?? ''} ${b.genre ?? ''}'.toLowerCase();
-      if (!tokens.every(haystack.contains)) return false;
       if (_genre.isNotEmpty && b.genre != _genre) return false;
       return true;
     }).toList();
@@ -101,7 +95,7 @@ class _BooksScreenState extends State<BooksScreen> {
     return filtered;
   }
 
-  bool get _hasActiveFilters => _query.isNotEmpty || _genre.isNotEmpty;
+  bool get _hasActiveFilters => _genre.isNotEmpty;
 
   Future<void> _editBook(Book book) async {
     final meta = await showDialog<_EditMeta>(
@@ -247,22 +241,6 @@ class _BooksScreenState extends State<BooksScreen> {
         slivers: [
           SliverToBoxAdapter(child: _buildToolbar(context)),
           const SliverPadding(padding: EdgeInsets.only(top: 20)),
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(24, 0, 24, 20),
-              child: Row(
-                children: [
-                  Text('Books',
-                      style: SereneType.headlineMobile.copyWith(color: colors.onSurface)),
-                  const Spacer(),
-                  Text(
-                    '${filtered.length} ${filtered.length == 1 ? 'book' : 'books'}',
-                    style: SereneType.labelMd.copyWith(color: colors.onSurfaceVariant),
-                  ),
-                ],
-              ),
-            ),
-          ),
           if (filtered.isEmpty)
             SliverFillRemaining(
               hasScrollBody: false,
@@ -272,18 +250,18 @@ class _BooksScreenState extends State<BooksScreen> {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(_books.isEmpty ? Icons.auto_stories : Icons.search_off,
+                      Icon(_books.isEmpty ? Icons.auto_stories : Icons.filter_alt_off,
                           size: 56, color: colors.outlineVariant),
                       const SizedBox(height: 16),
                       Text(
-                        _books.isEmpty ? 'No books yet' : 'No matching books',
+                        _books.isEmpty ? 'No books yet' : 'No books in this genre',
                         style: SereneType.title.copyWith(color: colors.onSurface),
                       ),
                       const SizedBox(height: 8),
                       Text(
                         _books.isEmpty
                             ? 'Upload a PDF to get started.'
-                            : 'Try a different search or filter.',
+                            : 'Try a different genre.',
                         textAlign: TextAlign.center,
                         style: SereneType.uiBody.copyWith(color: colors.onSurfaceVariant),
                       ),
@@ -334,21 +312,6 @@ class _BooksScreenState extends State<BooksScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          TextField(
-            onChanged: (v) => setState(() => _query = v),
-            textInputAction: TextInputAction.search,
-            decoration: InputDecoration(
-              hintText: 'Search your library…',
-              prefixIcon: const Icon(Icons.search),
-              suffixIcon: _query.isEmpty
-                  ? null
-                  : IconButton(
-                      icon: const Icon(Icons.clear),
-                      onPressed: () => setState(() => _query = ''),
-                    ),
-            ),
-          ),
-          const SizedBox(height: 12),
           Row(
             children: [
               _FilterChip(
@@ -366,7 +329,6 @@ class _BooksScreenState extends State<BooksScreen> {
                 const SizedBox(width: 8),
                 GestureDetector(
                   onTap: () => setState(() {
-                    _query = '';
                     _genre = '';
                     _sort = _BooksSort.newest;
                   }),

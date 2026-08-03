@@ -136,8 +136,10 @@ def filter_running_noise(lines_by_page: list[list[Line]], page_heights: list[flo
     # Chapter running headers/footers only cover the pages of that chapter
     # (as few as 5-15 pages), so use a small fixed threshold. The top/bottom
     # margin-band check plus the 80-char cap already keep body text out of
-    # consideration, making false positives rare.
-    repeat_threshold = max(4, int(page_count * 0.01))
+    # consideration, making false positives rare. Note: two-up books are
+    # split into two logical pages per sheet, so the threshold scales with
+    # half the page count -- a running header appears once per spread.
+    repeat_threshold = max(4, int(page_count * 0.005))
 
     band_lines: list[str] = []
     for lines, height in zip(lines_by_page, page_heights):

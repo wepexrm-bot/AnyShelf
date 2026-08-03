@@ -194,7 +194,7 @@ class _SideRail extends StatelessWidget {
         child: Column(
           children: [
             const SizedBox(height: 24),
-            for (var i = 0; i < items.length; i++)
+            for (var i = 0; i < items.length - 1; i++)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 8),
                 child: _RailItem(
@@ -206,6 +206,17 @@ class _SideRail extends StatelessWidget {
                 ),
               ),
             const Spacer(),
+            // Settings stays pinned to the bottom of the rail.
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: _RailItem(
+                active: index == items.length - 1,
+                outlinedIcon: items.last.$1,
+                filledIcon: items.last.$2,
+                label: items.last.$3,
+                onTap: () => onSelect(items.length - 1),
+              ),
+            ),
           ],
         ),
       ),
