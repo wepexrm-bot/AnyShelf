@@ -91,7 +91,7 @@ class _AuthScreenState extends State<AuthScreen> {
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Send reset link'),
+            child: const Text('Send verification code'),
           ),
         ],
       ),
@@ -120,7 +120,7 @@ class _AuthScreenState extends State<AuthScreen> {
             TextField(
               controller: tokenCtl,
               decoration: const InputDecoration(
-                  labelText: 'Reset token from email'),
+                  labelText: '6-digit verification code'),
             ),
             const SizedBox(height: 12),
             TextField(
