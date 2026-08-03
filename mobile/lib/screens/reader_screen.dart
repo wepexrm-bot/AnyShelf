@@ -2090,9 +2090,12 @@ class _SeekBar extends StatelessWidget {
                       ),
                     ),
                   ),
-                  FractionallySizedBox(
-                    widthFactor: f == 0 ? 0.001 : f,
-                    alignment: Alignment.centerRight,
+                  Positioned(
+                    left: barWidth <= 0
+                        ? 0.0
+                        : (f * barWidth - 9.0)
+                            .clamp(0.0, math.max(0.0, barWidth - 18.0))
+                            .toDouble(),
                     child: Container(
                       width: 18,
                       height: 18,
