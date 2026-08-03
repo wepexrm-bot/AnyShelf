@@ -77,6 +77,7 @@ export default function Reader() {
   const backTo = location.state?.from || "/";
   const [book, setBook] = useState(null);
   const [structuredText, setStructuredText] = useState(null);
+  const [extraction, setExtraction] = useState(null);
   const [theme, setTheme] = useState(DEFAULT_THEME);
   const [panel, setPanel] = useState(null);
   const [annotations, setAnnotations] = useState([]);
@@ -168,7 +169,10 @@ export default function Reader() {
   }, [theme.mode, book]);
 
   useEffect(() => {
-    (async () => {
+    let cancelled = false;
+    let timer = null;
+
+    const loadBook = async () => {
       setBook(null);
       setStructuredText(null);
       setPageCount(0);
@@ -177,12 +181,26 @@ export default function Reader() {
       setCurrentPage(0);
       setAnnotations([]);
       const data = await api(`/books/${bookId}`);
+      if (cancelled) return;
       setBook(data);
+      const extractingNow =
+        data.extraction_status === "pending" || data.extraction_status === "processing";
+      setExtraction(
+        extractingNow ? { status: data.extraction_status, progress: 0 } : null
+      );
+      if (extractingNow && !timer) timer = setTimeout(poll, 1000);
+
       if (data.structured_text_url) {
-        const res = await fetch(data.structured_text_url);
-        const st = await res.json();
-        setStructuredText(st);
-        setPageCount(st.pages?.length || 0);
+        try {
+          const res = await fetch(data.structured_text_url);
+          const st = await res.json();
+          if (cancelled) return;
+          setStructuredText(st);
+          setPageCount(st.pages?.length || 0);
+        } catch {
+          if (cancelled) return;
+          setStructuredText(null);
+        }
       }
 
       const [savedSettings, savedProgress, savedAnnotations] = await Promise.all([
@@ -190,6 +208,7 @@ export default function Reader() {
         api(`/sync/progress/${bookId}`).catch(() => null),
         api(`/sync/annotations/${bookId}`).catch(() => []),
       ]);
+      if (cancelled) return;
 
       if (savedSettings) {
         const preset = THEME_PRESETS.find((p) => p.id === savedSettings.theme) || THEME_PRESETS[0];
@@ -221,7 +240,32 @@ export default function Reader() {
       }
       setProgressLoaded(true);
       setAnnotations(savedAnnotations);
-    })();
+    };
+
+    const poll = async () => {
+      if (cancelled) return;
+      timer = null;
+      try {
+        const r = await api(`/books/${bookId}/progress`);
+        if (cancelled) return;
+        if (r.extraction_status === "pending" || r.extraction_status === "processing") {
+          setExtraction({ status: r.extraction_status, progress: r.progress });
+          timer = setTimeout(poll, 1000);
+        } else {
+          setExtraction(null);
+          await loadBook();
+        }
+      } catch {
+        if (!cancelled) timer = setTimeout(poll, 1000);
+      }
+    };
+
+    loadBook();
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, [bookId]);
 
   // Track scroll depth -> reading progress + current page (scroll mode)
@@ -350,6 +394,45 @@ export default function Reader() {
   }, [currentPage]);
 
   if (!book) return <div className="loading">Loading bookâ€¦</div>;
+
+  if (extraction) {
+    const pct = Math.min(100, Math.max(0, Math.round(extraction.progress || 0)));
+    return (
+      <div
+        style={{
+          height: "100vh",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: "24px",
+          background: theme.background,
+          color: theme.textColor,
+        }}
+      >
+        <div
+          style={{
+            width: 56,
+            height: 56,
+            borderRadius: "50%",
+            border: "4px solid rgba(128,128,128,0.25)",
+            borderTopColor: "var(--primary, #1a73e8)",
+            animation: "readerSpin 1s linear infinite",
+          }}
+        />
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>
+            {extraction.status === "pending" ? "Preparing your book…" : "Processing pages…"}
+          </div>
+          <div style={{ opacity: 0.7, fontSize: 14 }}>
+            {extraction.status === "pending"
+              ? "Your book is in the queue"
+              : `Extracting text and layout${pct > 0 ? ` — ${pct}%` : ""}`}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const reflowAvailable = book.reflow_confidence >= 0.5 && structuredText;
   const allBlocks = reflowAvailable
