@@ -1,3 +1,8 @@
+import 'dart:typed_data';
+
+import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
+
 import '../models/shelf.dart';
 import 'api_client.dart';
 
@@ -52,6 +57,29 @@ class ShelvesService {
 
   Future<void> removeBook(String shelfId, String bookId) async {
     await api.delete('/shelves/$shelfId/books/$bookId');
+  }
+
+  Future<void> uploadBanner(
+    String shelfId, {
+    required Uint8List bytes,
+    required String filename,
+  }) async {
+    final lower = filename.toLowerCase();
+    final media = lower.endsWith('.png')
+        ? MediaType('image', 'png')
+        : lower.endsWith('.webp')
+            ? MediaType('image', 'webp')
+            : MediaType('image', 'jpeg');
+    final files = <http.MultipartFile>[
+      http.MultipartFile.fromBytes(
+        'file',
+        bytes,
+        filename: filename,
+        contentType: media,
+      )
+    ];
+    await api.postMultipart('/shelves/$shelfId/banner',
+        fields: const {}, files: files);
   }
 
   Shelf _reachable(Shelf s) => Shelf(
