@@ -115,8 +115,11 @@ def _send_via_brevo_api(to: str, subject: str, html: str) -> bool:
 def _parse_address(addr: str) -> dict:
     import email.utils
 
-    name, email = email.utils.parseaddr(addr)
-    return {"name": name or "", "email": email}
+    name, email_addr = email.utils.parseaddr(addr)
+    result = {"email": email_addr}
+    if name:
+        result["name"] = name
+    return result
 
 
 def _send_via_smtp(to: str, subject: str, html: str) -> bool:
