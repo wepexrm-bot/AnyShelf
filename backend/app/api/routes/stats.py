@@ -82,6 +82,7 @@ class SessionReport(BaseModel):
 def record_session(body: SessionReport, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     user_id = user.id
     session = ReadingSession(
+        user_id=user_id,
         book_id=body.book_id,
         pages=body.pages,
         minutes=body.minutes,
