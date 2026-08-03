@@ -99,7 +99,7 @@ class _AuthScreenState extends State<AuthScreen> {
     if (sent != true) return;
     try {
       await _auth.forgotPassword(emailCtl.text.trim());
-      _toast('If that email exists, a reset link was sent.');
+      _toast('If that email exists, a verification code was sent.');
     } on ApiException catch (e) {
       _toast(e.message);
     }

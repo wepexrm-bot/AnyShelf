@@ -1,6 +1,5 @@
 import logging
 import secrets
-import urllib.parse
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Header, UploadFile, File
@@ -18,8 +17,6 @@ from app.db.database import get_db
 router = APIRouter()
 logger = logging.getLogger("Anyshelf.auth")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-FRONTEND_BASE = settings.frontend_base
 
 
 def generate_verification_code() -> str:
@@ -51,6 +48,7 @@ class ForgotPasswordRequest(BaseModel):
 
 
 class ResetPasswordRequest(BaseModel):
+    email: EmailStr
     token: str
     password: str = Field(min_length=8)
 
@@ -179,33 +177,29 @@ def forgot_password(body: ForgotPasswordRequest, db: Session = Depends(get_db)):
     if not user:
         return {"status": "sent"}
 
-    token = secrets.token_urlsafe(32)
-    user.reset_token = token
+    code = generate_verification_code()
+    user.reset_token = code
     user.reset_token_expires = datetime.utcnow() + timedelta(
         minutes=settings.password_reset_link_ttl_minutes
     )
     db.commit()
 
-    link = (
-        f"{FRONTEND_BASE}/reset-password?token={urllib.parse.quote(token)}"
-        f"&email={urllib.parse.quote(user.email)}"
-    )
     send_email(
         user.email,
         "Reset your Anyshelf password",
-        render_button_link("Use the link below to set a new password. It expires in 30 minutes.", link),
+        render_code_email(code, "reset your password"),
     )
     return {"status": "sent"}
 
 
 @router.post("/reset-password")
 def reset_password(body: ResetPasswordRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.reset_token == body.token).first()
-    if not user:
-        raise HTTPException(status_code=400, detail="Invalid reset token")
+    user = _get_user_by_email(db, body.email)
+    if not user or user.reset_token != body.token:
+        raise HTTPException(status_code=400, detail="Invalid reset code")
 
     if user.reset_token_expires and user.reset_token_expires < datetime.utcnow():
-        raise HTTPException(status_code=400, detail="Reset link has expired")
+        raise HTTPException(status_code=400, detail="Reset code has expired")
 
     user.hashed_password = pwd_context.hash(body.password)
     user.reset_token = None

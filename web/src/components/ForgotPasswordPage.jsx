@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import AuthShell from "./AuthShell";
 import { api } from "../api";
 
@@ -8,6 +8,7 @@ export default function ForgotPasswordPage() {
   const [sent, setSent] = useState(false);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
+  const navigate = useNavigate();
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -26,7 +27,7 @@ export default function ForgotPasswordPage() {
   return (
     <AuthShell
       title="Reset your password"
-      subtitle="Enter your email and we'll send you a link to set a new password."
+      subtitle="Enter your email and we'll send you a verification code."
       footer={
         <>
           Remembered it? <Link to="/login" style={{ color: "var(--primary)" }}>Log in</Link>
@@ -36,8 +37,17 @@ export default function ForgotPasswordPage() {
       {error && <div className="alert alert-error">{error}</div>}
       {sent ? (
         <div className="alert alert-success">
-          If an account exists for <strong>{email}</strong>, a password reset link is on its way. The
-          link expires in 30 minutes.
+          If an account exists for <strong>{email}</strong>, a verification code is on its way. The
+          code expires in 30 minutes.
+          <div style={{ marginTop: 12 }}>
+            <button
+              type="button"
+              className="btn btn-primary btn-block"
+              onClick={() => navigate(`/reset-password?email=${encodeURIComponent(email)}`)}
+            >
+              Enter the code
+            </button>
+          </div>
         </div>
       ) : (
         <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -53,7 +63,7 @@ export default function ForgotPasswordPage() {
             />
           </div>
           <button type="submit" className="btn btn-primary btn-block" disabled={loading}>
-            {loading ? "Sending..." : "Send reset link"}
+            {loading ? "Sending..." : "Send verification code"}
           </button>
         </form>
       )}

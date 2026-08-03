@@ -6,6 +6,8 @@ import { api } from "../api";
 export default function ResetPasswordPage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
+  const [email, setEmail] = useState(searchParams.get("email") || "");
+  const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState(null);
@@ -15,6 +17,10 @@ export default function ResetPasswordPage() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError(null);
+    if (code.trim().length !== 6) {
+      setError("Enter the 6-digit code from your email.");
+      return;
+    }
     if (password.length < 8) {
       setError("Password must be at least 8 characters.");
       return;
@@ -27,7 +33,7 @@ export default function ResetPasswordPage() {
     try {
       await api("/auth/reset-password", {
         method: "POST",
-        body: { token: searchParams.get("token"), password },
+        body: { email, token: code.trim(), password },
         auth: false,
       });
       setDone(true);
@@ -41,7 +47,7 @@ export default function ResetPasswordPage() {
   return (
     <AuthShell
       title="Set a new password"
-      subtitle="Choose a strong password to protect your account."
+      subtitle="Enter the 6-digit code from your email and choose a new password."
       footer={
         done ? (
           <Link to="/login" style={{ color: "var(--primary)" }}>Go to log in</Link>
@@ -63,6 +69,29 @@ export default function ResetPasswordPage() {
         </div>
       ) : (
         <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div className="field">
+            <label htmlFor="email">Email</label>
+            <input
+              id="email"
+              type="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com"
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="code">Verification code</label>
+            <input
+              id="code"
+              type="text"
+              required
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              placeholder="6-digit code"
+              maxLength={6}
+            />
+          </div>
           <div className="field">
             <label htmlFor="password">New password</label>
             <input
