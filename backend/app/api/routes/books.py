@@ -244,6 +244,38 @@ def update_book(
     return {"id": book.id, "status": "updated"}
 
 
+@router.put("/{book_id}/cover")
+def update_book_cover(
+    book_id: str,
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Replace a book's cover image."""
+    book = db.query(Book).filter(Book.id == book_id).first()
+    if not book:
+        raise HTTPException(status_code=404, detail="Book not found")
+    if book.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Not your book")
+
+    contents = file.file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    storage_key = f"covers/{user.id}/{book_id}.jpg"
+    upload_bytes(contents, storage_key, content_type=file.content_type or "image/jpeg")
+
+    old_key = book.cover_key
+    book.cover_key = storage_key
+    db.commit()
+    if old_key:
+        try:
+            delete_file(old_key)
+        except Exception:
+            pass
+    return {"cover_url": get_presigned_url(storage_key)}
+
+
 @router.get("/{book_id}")
 def get_book(book_id: str, db: Session = Depends(get_db)):
     book = db.query(Book).filter(Book.id == book_id).first()

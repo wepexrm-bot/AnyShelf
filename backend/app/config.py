@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     s3_bucket: str = "cloudread-books"
     s3_region: str = "us-east-1"
     s3_endpoint_url: str | None = None  # set for MinIO/local dev
+    aws_access_key_id: str | None = None
+    aws_secret_access_key: str | None = None
 
     # Auth
     jwt_secret: str = "change-me-in-production"
@@ -47,6 +49,8 @@ class Settings(BaseSettings):
         "smtp_user",
         "smtp_password",
         "brevo_api_key",
+        "aws_access_key_id",
+        "aws_secret_access_key",
         mode="before",
     )
     @classmethod

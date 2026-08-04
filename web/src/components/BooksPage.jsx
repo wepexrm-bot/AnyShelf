@@ -4,6 +4,7 @@ import Sidebar from "./Sidebar";
 import { api } from "../api";
 import AppHeader from "./AppHeader";
 import UploadModal, { GENRES } from "./UploadModal";
+import BookActionsMenu from "./BookActionsMenu";
 
 const ACCENTS = [
   "#154212",
@@ -36,7 +37,7 @@ function searchableText(book) {
   return `${book.title} ${book.author || ""} ${book.genre || ""} ${dateStr} ${book.created_at || ""}`.toLowerCase();
 }
 
-function BookCard({ book }) {
+function BookCard({ book, onChanged }) {
   const accent = accentFor(book);
   const location = useLocation();
   return (
@@ -72,6 +73,7 @@ function BookCard({ book }) {
           </div>
         </div>
       </Link>
+      <BookActionsMenu book={book} onChanged={onChanged} />
       <div className="book-card__title">{book.title}</div>
     </div>
   );
@@ -199,7 +201,7 @@ export default function BooksPage() {
           ) : (
             <div className="books-grid">
               {filtered.map((book) => (
-                <BookCard key={book.id} book={book} />
+                <BookCard key={book.id} book={book} onChanged={load} />
               ))}
             </div>
           )}
