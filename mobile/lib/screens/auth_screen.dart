@@ -5,6 +5,7 @@ import '../services/auth_service.dart';
 import '../theme/serene_theme.dart';
 import '../theme/serene_tokens.dart';
 import '../widgets/app_shell.dart';
+import '../widgets/password_field.dart';
 
 /// Sign in / create account gate before the library.
 class AuthScreen extends StatefulWidget {
@@ -109,45 +110,12 @@ class _AuthScreenState extends State<AuthScreen> {
   }
 
   Future<void> _resetPasswordFlow(String email) async {
-    final tokenCtl = TextEditingController();
-    final passCtl = TextEditingController();
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showDialog<(String, String)>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Reset password'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: tokenCtl,
-              decoration: const InputDecoration(
-                  labelText: '6-digit verification code'),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: passCtl,
-              obscureText: true,
-              decoration: const InputDecoration(labelText: 'New password'),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Reset'),
-          ),
-        ],
-      ),
+      builder: (_) => const _ResetPasswordDialog(),
     );
-    final token = tokenCtl.text.trim();
-    final password = passCtl.text;
-    tokenCtl.dispose();
-    passCtl.dispose();
-    if (confirmed != true) return;
+    if (confirmed == null) return;
+    final (token, password) = confirmed;
     try {
       await _auth.resetPassword(
         email: email,
@@ -293,6 +261,65 @@ class _AuthScreenState extends State<AuthScreen> {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Owns the reset-password fields so their controllers are disposed only when
+/// the route has fully unmounted, and returns the entered (token, password) so
+/// the caller never races the dialog's exit animation.
+class _ResetPasswordDialog extends StatefulWidget {
+  const _ResetPasswordDialog();
+
+  @override
+  State<_ResetPasswordDialog> createState() => _ResetPasswordDialogState();
+}
+
+class _ResetPasswordDialogState extends State<_ResetPasswordDialog> {
+  final _tokenCtl = TextEditingController();
+  final _passCtl = TextEditingController();
+
+  @override
+  void dispose() {
+    _tokenCtl.dispose();
+    _passCtl.dispose();
+    super.dispose();
+  }
+
+  (String, String) _result() =>
+      (_tokenCtl.text.trim(), _passCtl.text);
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Reset password'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: _tokenCtl,
+            decoration: const InputDecoration(
+                labelText: '6-digit verification code'),
+          ),
+          const SizedBox(height: 12),
+          PasswordField(
+            controller: _passCtl,
+            labelText: 'New password',
+            textInputAction: TextInputAction.done,
+            onSubmitted: (_) => Navigator.pop(context, _result()),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, _result()),
+          child: const Text('Reset'),
+        ),
+      ],
     );
   }
 }

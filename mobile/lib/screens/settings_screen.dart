@@ -7,6 +7,7 @@ import '../services/ui_mode_controller.dart';
 import '../theme/serene_theme.dart';
 import '../theme/serene_tokens.dart';
 import '../widgets/app_header.dart';
+import '../widgets/password_field.dart';
 import 'auth_screen.dart';
 
 /// Settings: appearance (light/dark), account details, change password and
@@ -331,26 +332,23 @@ class _ChangePasswordDialogState extends State<_ChangePasswordDialog> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            TextField(
+            PasswordField(
               controller: _oldCtl,
-              obscureText: true,
+              labelText: 'Current password',
               textInputAction: TextInputAction.next,
-              decoration: const InputDecoration(labelText: 'Current password'),
             ),
             const SizedBox(height: 12),
-            TextField(
+            PasswordField(
               controller: _newCtl,
-              obscureText: true,
+              labelText: 'New password',
               textInputAction: TextInputAction.next,
-              decoration: const InputDecoration(labelText: 'New password'),
             ),
             const SizedBox(height: 12),
-            TextField(
+            PasswordField(
               controller: _confirmCtl,
-              obscureText: true,
+              labelText: 'Confirm new password',
               textInputAction: TextInputAction.done,
               onSubmitted: (_) => _submit(),
-              decoration: const InputDecoration(labelText: 'Confirm new password'),
             ),
             if (_error != null) ...[
               const SizedBox(height: 10),
