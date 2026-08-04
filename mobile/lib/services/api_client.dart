@@ -92,15 +92,16 @@ class ApiClient {
         headers: await _headers(),
       );
 
-  /// Multipart POST for file uploads (e.g. `POST /books/upload`). Attaches the
-  /// bearer token and decodes/throws like the other calls.
+  /// Multipart file upload (e.g. `POST /books/upload`, `PUT /books/{id}/cover`).
+  /// Attaches the bearer token and decodes/throws like the other calls.
   Future<dynamic> postMultipart(
     String path, {
     required Map<String, String> fields,
     required List<http.MultipartFile> files,
+    String method = 'POST',
   }) async {
     final uri = Uri.parse('$baseUrl$path');
-    final req = http.MultipartRequest('POST', uri);
+    final req = http.MultipartRequest(method, uri);
     req.fields.addAll(fields);
     req.files.addAll(files);
     req.headers['Accept'] = 'application/json';

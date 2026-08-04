@@ -483,7 +483,7 @@ class _UploadFormDialogState extends State<_UploadFormDialog> {
             fit: StackFit.expand,
             children: [
               CustomPaint(
-                painter: _DashedRectPainter(
+                painter: DashedRectPainter(
                   color: colors.outlineVariant,
                   radius: 18,
                 ),
@@ -534,10 +534,10 @@ class _UploadFormDialogState extends State<_UploadFormDialog> {
 
 /// Dashed rounded rectangle used for the PDF/cover upload zones, matching the
 /// web's `.upload-zone` dashed border.
-class _DashedRectPainter extends CustomPainter {
+class DashedRectPainter extends CustomPainter {
   final Color color;
   final double radius;
-  const _DashedRectPainter({required this.color, required this.radius});
+  const DashedRectPainter({required this.color, required this.radius});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -562,7 +562,7 @@ class _DashedRectPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_DashedRectPainter oldDelegate) =>
+  bool shouldRepaint(DashedRectPainter oldDelegate) =>
       oldDelegate.color != color || oldDelegate.radius != radius;
 }
 

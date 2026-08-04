@@ -95,6 +95,24 @@ class BooksService {
     });
   }
 
+  /// Replaces a book's cover image.
+  Future<void> updateCover(String id,
+      {required Uint8List coverBytes, required String coverName}) async {
+    await api.postMultipart(
+      '/books/$id/cover',
+      method: 'PUT',
+      fields: const {},
+      files: [
+        http.MultipartFile.fromBytes(
+          'file',
+          coverBytes,
+          filename: coverName,
+          contentType: _coverContentType(coverName),
+        ),
+      ],
+    );
+  }
+
   Book _reachable(Book b) => Book(
         id: b.id,
         title: b.title,

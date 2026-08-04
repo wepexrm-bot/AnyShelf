@@ -1,3 +1,6 @@
+import 'dart:typed_data';
+
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
 import '../models/book.dart';
@@ -9,6 +12,7 @@ import '../theme/serene_theme.dart';
 import '../theme/serene_tokens.dart';
 import '../widgets/app_header.dart';
 import '../widgets/book_card.dart';
+import '../widgets/stable_network_image.dart';
 import '../widgets/upload_flow.dart';
 
 enum _BooksSort { newest, oldest }
@@ -98,6 +102,13 @@ class _BooksScreenState extends State<BooksScreen> {
         author: meta.author,
         genre: meta.genre,
       );
+      if (meta.coverBytes != null && meta.coverName != null) {
+        await _booksService.updateCover(
+          book.id,
+          coverBytes: meta.coverBytes!,
+          coverName: meta.coverName!,
+        );
+      }
       LibraryRefresh.instance.bump();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -452,9 +463,20 @@ class _EditMeta {
   final String title;
   final String author;
   final String? genre;
-  const _EditMeta({required this.title, required this.author, this.genre});
+  final Uint8List? coverBytes;
+  final String? coverName;
+  const _EditMeta({
+    required this.title,
+    required this.author,
+    this.genre,
+    this.coverBytes,
+    this.coverName,
+  });
 }
 
+/// Book metadata editor, mirroring the web's Edit Book dialog: header with
+/// icon + subtitle, labelled name / author / genre fields, a cover picker that
+/// shows the current cover, and Cancel / Save changes actions.
 class _EditBookDialog extends StatefulWidget {
   final Book book;
   const _EditBookDialog({required this.book});
@@ -469,6 +491,11 @@ class _EditBookDialogState extends State<_EditBookDialog> {
   late final TextEditingController _authorCtl =
       TextEditingController(text: widget.book.author ?? '');
   late String _genre = widget.book.genre ?? '';
+  Uint8List? _coverBytes;
+  String? _coverName;
+
+  SereneColorScheme get _colors =>
+      Theme.of(context).extension<SereneTheme>()!.colors;
 
   @override
   void dispose() {
@@ -477,8 +504,24 @@ class _EditBookDialogState extends State<_EditBookDialog> {
     super.dispose();
   }
 
-  bool get _valid =>
-      _titleCtl.text.trim().isNotEmpty && _authorCtl.text.trim().isNotEmpty;
+  // Like the web form, only the book name is required to save.
+  bool get _valid => _titleCtl.text.trim().isNotEmpty;
+
+  Future<void> _pickCover() async {
+    const typeGroup = XTypeGroup(
+      label: 'Image',
+      extensions: ['jpg', 'jpeg', 'png', 'webp'],
+      mimeTypes: ['image/jpeg', 'image/png', 'image/webp'],
+    );
+    final file = await openFile(acceptedTypeGroups: [typeGroup]);
+    if (file == null || !mounted) return;
+    final bytes = await file.readAsBytes();
+    if (!mounted) return;
+    setState(() {
+      _coverBytes = bytes;
+      _coverName = file.name;
+    });
+  }
 
   void _submit() {
     if (!_valid) return;
@@ -486,51 +529,272 @@ class _EditBookDialogState extends State<_EditBookDialog> {
       title: _titleCtl.text.trim(),
       author: _authorCtl.text.trim(),
       genre: _genre.isEmpty ? null : _genre,
+      coverBytes: _coverBytes,
+      coverName: _coverName,
     ));
   }
 
+  InputDecoration _input(String hint) {
+    final colors = _colors;
+    return InputDecoration(
+      hintText: hint,
+      hintStyle: SereneType.uiBody.copyWith(fontSize: 14, color: colors.outline),
+      filled: true,
+      fillColor: colors.surfaceContainerLowest,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      border: _inputBorder(),
+      enabledBorder: _inputBorder(),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: colors.primary),
+      ),
+    );
+  }
+
+  OutlineInputBorder _inputBorder() => OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: _colors.outlineVariant),
+      );
+
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Edit book info'),
-      content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: _titleCtl,
-              decoration: const InputDecoration(labelText: 'Book name'),
-              onChanged: (_) => setState(() {}),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _authorCtl,
-              decoration: const InputDecoration(labelText: 'Author'),
-              onChanged: (_) => setState(() {}),
-            ),
-            const SizedBox(height: 12),
-            DropdownButtonFormField<String>(
-              initialValue: _genre,
-              isExpanded: true,
-              decoration: const InputDecoration(labelText: 'Genre'),
-              items: [
-                const DropdownMenuItem(value: '', child: Text('No genre')),
-                for (final g in BooksService.genres)
-                  DropdownMenuItem(value: g, child: Text(g)),
-              ],
-              onChanged: (v) => setState(() => _genre = v ?? ''),
-            ),
-          ],
+    final colors = _colors;
+    return Dialog(
+      backgroundColor: colors.surfaceContainerLowest,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(22),
+        side: BorderSide(color: colors.outlineVariant),
+      ),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 480),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(28, 26, 28, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _header(colors),
+              const SizedBox(height: 20),
+              _label(colors, 'Book name', required: true),
+              const SizedBox(height: 6),
+              TextField(
+                controller: _titleCtl,
+                autofocus: true,
+                style: SereneType.uiBody
+                    .copyWith(fontSize: 14, color: colors.onSurface),
+                decoration: _input('e.g. The Great Gatsby'),
+                onChanged: (_) => setState(() {}),
+              ),
+              const SizedBox(height: 20),
+              _label(colors, 'Author'),
+              const SizedBox(height: 6),
+              TextField(
+                controller: _authorCtl,
+                style: SereneType.uiBody
+                    .copyWith(fontSize: 14, color: colors.onSurface),
+                decoration: _input('e.g. F. Scott Fitzgerald'),
+                onChanged: (_) => setState(() {}),
+                onSubmitted: (_) => _submit(),
+              ),
+              const SizedBox(height: 20),
+              _label(colors, 'Genre'),
+              const SizedBox(height: 6),
+              DropdownButtonFormField<String>(
+                initialValue: _genre,
+                isExpanded: true,
+                style: SereneType.uiBody
+                    .copyWith(fontSize: 14, color: colors.onSurface),
+                dropdownColor: colors.surfaceContainerLow,
+                menuMaxHeight: 360,
+                decoration: _input('Select a genre (optional)'),
+                icon: Icon(Icons.expand_more, color: colors.onSurfaceVariant),
+                items: [
+                  const DropdownMenuItem(
+                    value: '',
+                    child: Text('Select a genre (optional)'),
+                  ),
+                  for (final g in BooksService.genres)
+                    DropdownMenuItem(value: g, child: Text(g)),
+                ],
+                onChanged: (v) => setState(() => _genre = v ?? ''),
+              ),
+              const SizedBox(height: 20),
+              _label(colors, 'Cover image', optional: true),
+              const SizedBox(height: 6),
+              _coverZone(colors),
+              const SizedBox(height: 24),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: Text('Cancel',
+                        style: SereneType.labelMd
+                            .copyWith(color: colors.onSurfaceVariant)),
+                  ),
+                  const SizedBox(width: 12),
+                  FilledButton.icon(
+                    onPressed: _valid ? _submit : null,
+                    icon: const Icon(Icons.save_outlined, size: 17),
+                    label: const Text('Save changes'),
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Cancel'),
+    );
+  }
+
+  Widget _header(SereneColorScheme colors) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: colors.primaryContainer,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(Icons.edit_outlined,
+                    size: 22, color: colors.onPrimaryContainer),
+              ),
+              const SizedBox(height: 14),
+              Text(
+                'Edit Book',
+                style: SereneType.title.copyWith(
+                  fontSize: 23,
+                  fontWeight: FontWeight.w700,
+                  color: colors.onSurface,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Update the name, author, genre or cover.',
+                style: SereneType.labelMd.copyWith(
+                  fontSize: 13,
+                  color: colors.onSurfaceVariant,
+                  height: 1.4,
+                ),
+              ),
+            ],
+          ),
         ),
-        FilledButton(
-          onPressed: _valid ? _submit : null,
-          child: const Text('Save'),
+        IconButton(
+          onPressed: () => Navigator.pop(context),
+          icon: Icon(Icons.close, size: 20, color: colors.onSurfaceVariant),
+          visualDensity: VisualDensity.compact,
+        ),
+      ],
+    );
+  }
+
+  Widget _label(
+    SereneColorScheme colors,
+    String text, {
+    bool required = false,
+    bool optional = false,
+  }) {
+    return Row(
+      children: [
+        Text(
+          text.toUpperCase(),
+          style: SereneType.labelSm.copyWith(
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+            letterSpacing: 0.04,
+            color: colors.onSurfaceVariant,
+          ),
+        ),
+        if (required)
+          Text(' *',
+              style: SereneType.labelSm.copyWith(color: colors.error)),
+        if (optional)
+          Text('  OPTIONAL',
+              style: SereneType.labelSm.copyWith(
+                fontSize: 12,
+                color: colors.onSurfaceVariant,
+              )),
+      ],
+    );
+  }
+
+  Widget _coverZone(SereneColorScheme colors) {
+    final hasNew = _coverBytes != null;
+    final currentUrl = widget.book.coverUrl;
+    return GestureDetector(
+      onTap: _pickCover,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(18),
+        child: Container(
+          height: 132,
+          color: colors.surfaceContainerLow,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              CustomPaint(
+                painter: DashedRectPainter(
+                  color: colors.outlineVariant,
+                  radius: 18,
+                ),
+              ),
+              if (hasNew)
+                Image(
+                  // Decode the picked image at display resolution.
+                  image: ResizeImage(
+                    MemoryImage(_coverBytes!),
+                    width:
+                        (132 * MediaQuery.devicePixelRatioOf(context)).round(),
+                  ),
+                  fit: BoxFit.cover,
+                )
+              else if (currentUrl != null && currentUrl.isNotEmpty)
+                Image(
+                  image: ResizeImage(
+                    StableNetworkImage(currentUrl),
+                    width:
+                        (132 * MediaQuery.devicePixelRatioOf(context)).round(),
+                  ),
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => _coverHint(colors),
+                )
+              else
+                _coverHint(colors),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _coverHint(SereneColorScheme colors) {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Icon(Icons.add_photo_alternate, size: 26, color: colors.primary),
+        const SizedBox(height: 8),
+        Text(
+          'Upload a cover image',
+          style: SereneType.labelMd.copyWith(
+            fontSize: 13,
+            fontWeight: FontWeight.w500,
+            color: colors.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          'JPG or PNG, optional',
+          style: SereneType.labelSm.copyWith(
+            fontSize: 12,
+            color: colors.onSurfaceVariant,
+          ),
         ),
       ],
     );
