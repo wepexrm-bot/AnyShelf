@@ -1,7 +1,7 @@
 name: cloudread
 description: CloudRead — cloud-native PDF reading app (Serene design)
 publish_to: "none"
-version: 5.0.8+14
+version: 5.0.9+15
 
 environment:
   sdk: ">=3.6.0 <4.0.0"
@@ -17,6 +17,8 @@ dependencies:
   shared_preferences: ^2.3.2 # token + small local cache
   google_fonts: ^8.2.1
   file_selector: ^1.1.0
+  package_info_plus: ^10.2.1
+  url_launcher: ^6.3.2
 dev_dependencies:
   flutter_test:
     sdk: flutter
