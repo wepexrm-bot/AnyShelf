@@ -279,25 +279,19 @@ def update_book(
     if book.owner_id != user.id:
         raise HTTPException(status_code=403, detail="Not your book")
 
-    title_changed = False
-    author_changed = False
     if body.title is not None and body.title.strip():
-        new_title = body.title.strip()
-        title_changed = new_title != book.title
-        book.title = new_title
+        book.title = body.title.strip()
     if body.author is not None:
-        new_author = body.author.strip() or None
-        author_changed = new_author != book.author
-        book.author = new_author
+        book.author = body.author.strip() or None
     if body.genre is not None:
         book.genre = body.genre.strip() or None
     db.commit()
 
-    # The book still has no cover and its lookup-relevant metadata changed --
-    # kick off a background cover lookup with the corrected title/author.
-    # Same rules as upload: never clobber an existing cover, never fabricate
-    # a placeholder when there's no match.
-    if (title_changed or author_changed) and not book.cover_key:
+    # The book still has no cover -- kick off a background cover lookup with
+    # the (possibly corrected) title/author so a re-save on a coverless book
+    # retries it. Same rules as upload: never clobber an existing cover,
+    # never fabricate a placeholder when there's no match.
+    if not book.cover_key:
         background_tasks.add_task(fetch_and_store_cover, book.id, book.title, book.author or "")
 
     return {"id": book.id, "status": "updated"}
