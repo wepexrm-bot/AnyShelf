@@ -314,9 +314,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
         'anchor': '',
       });
       if (res is Map && res['id'] != null) {
+        if (!mounted) return;
         setState(() => _bookmarkId = res['id'] as String);
       }
     } catch (_) {
+      if (!mounted) return;
       setState(() => _bookmarked = false);
     }
   }
@@ -760,7 +762,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
       child: GestureDetector(
         onLongPressStart: (details) => _onLongPress(globalIndex, block, details),
         child: Container(
-          color: highlightColor != null ? _parseColor(highlightColor) : null,
+          color: highlightColor != null
+              ? _parseColor(highlightColor,
+                  fallback: _settings.atmosphere.accent)
+              : null,
           child: Text(block.text, style: style, textAlign: _settings.textAlign),
         ),
       ),
@@ -1077,9 +1082,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
     });
   }
 
-  Color _parseColor(String hex) {
-    final v = int.parse('FF${hex.replaceAll('#', '')}', radix: 16);
-    return Color(v).withValues(alpha: 0.45);
+  Color _parseColor(String hex, {Color fallback = const Color(0xFFFFFFFF)}) {
+    final cleaned = hex.replaceFirst('#', '');
+    if (cleaned.length != 6) return fallback;
+    final v = int.tryParse(cleaned, radix: 16);
+    if (v == null) return fallback;
+    return Color(0xFF000000 | v).withValues(alpha: 0.45);
   }
 
   // ----------------------------------------------------------------- chrome

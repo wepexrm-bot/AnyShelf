@@ -104,13 +104,19 @@ class UploadFlow {
     _UploadMeta meta,
     Future<void> Function() onUploaded,
   ) async {
-    unawaited(
-      showDialog<void>(
-        context: context,
-        barrierDismissible: false,
-        builder: (_) => const _UploadingDialog(),
-      ),
+    final navigator = Navigator.of(context);
+    var dialogRoute = DialogRoute<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const _UploadingDialog(),
     );
+    unawaited(navigator.push(dialogRoute));
+    void closeDialog() {
+      if (dialogRoute.isActive && dialogRoute.isCurrent) {
+        navigator.pop();
+      }
+    }
+
     try {
       final bytes = await file.readAsBytes();
       await BooksService().upload(
@@ -123,14 +129,14 @@ class UploadFlow {
         coverName: meta.coverName,
       );
       if (!context.mounted) return;
-      Navigator.of(context).pop();
+      closeDialog();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Upload queued — extracting pages…')),
       );
       await onUploaded();
     } catch (e) {
       if (!context.mounted) return;
-      Navigator.of(context).pop();
+      closeDialog();
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('Upload failed: $e')));
     }

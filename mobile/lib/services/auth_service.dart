@@ -23,9 +23,7 @@ class AuthService {
       if (displayName != null && displayName.isNotEmpty)
         'display_name': displayName,
     });
-    final map = data as Map<String, dynamic>;
-    await api.setToken(map['access_token'] as String?);
-    return map;
+    return data as Map<String, dynamic>;
   }
 
   Future<Map<String, dynamic>> me() async {

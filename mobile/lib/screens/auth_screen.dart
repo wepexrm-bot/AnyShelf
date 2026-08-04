@@ -33,20 +33,18 @@ class _AuthScreenState extends State<AuthScreen> {
     setState(() => _busy = true);
     try {
       if (_signup) {
-        final result = await _auth.register(
+        await _auth.register(
           email: email,
           password: password,
           displayName: _nameCtl.text.trim(),
         );
-        final verified = result['is_verified'] == true;
-        if (!verified) {
+        final ok = await _verifyEmailFlow(email);
+        if (!ok) {
           if (!mounted) return;
-          final ok = await _verifyEmailFlow(email);
-          if (!ok) {
-            setState(() => _busy = false);
-            return;
-          }
+          setState(() => _busy = false);
+          return;
         }
+        await _auth.login(email, password);
       } else {
         await _auth.login(email, password);
       }
@@ -322,18 +320,36 @@ class _VerifyEmailDialogState extends State<_VerifyEmailDialog> {
       if (!mounted) return;
       Navigator.pop(context, true);
     } on ApiException catch (e) {
+      if (!mounted) return;
       setState(() {
         _busy = false;
         _error = e.message;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = 'Verification failed. Check your connection and try again.';
       });
     }
   }
 
   Future<void> _resend() async {
-    await widget.auth.resendVerification(widget.email);
-    if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(const SnackBar(content: Text('Verification code sent.')));
+    if (_busy) return;
+    try {
+      await widget.auth.resendVerification(widget.email);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Verification code sent.')));
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(e.message)));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not resend. Check your connection.')));
+    }
   }
 
   @override
@@ -368,10 +384,13 @@ class _VerifyEmailDialogState extends State<_VerifyEmailDialog> {
       ),
       actions: [
         TextButton(
-          onPressed: () => Navigator.pop(context, false),
+          onPressed: _busy ? null : () => Navigator.pop(context, false),
           child: const Text('Cancel'),
         ),
-        TextButton(onPressed: _resend, child: const Text('Resend code')),
+        TextButton(
+          onPressed: _busy ? null : _resend,
+          child: const Text('Resend code'),
+        ),
         FilledButton(
           onPressed: _busy ? null : _verify,
           child: _busy
