@@ -156,14 +156,19 @@ class BooksService {
           .timeout(const Duration(seconds: 30)); // pre-signed URL, no auth
       if (res.statusCode != 200 || res.body.isEmpty) return null;
       // Decode off the UI isolate so large books don't jank the reader open.
-      return await compute(_decodeStructuredText, res.body);
+      // Hand the encoded bytes to the isolate rather than the decoded string,
+      // so the main isolate never holds a second (UTF-16) copy of the whole
+      // JSON body alongside the isolate's own copy.
+      return await compute(_decodeStructuredText, res.bodyBytes);
     } catch (_) {
       return null;
     }
   }
 
-  static StructuredText _decodeStructuredText(String body) =>
-      StructuredText.fromJson(jsonDecode(body) as Map<String, dynamic>);
+  static StructuredText _decodeStructuredText(List<int> body) {
+    final text = utf8.decode(body);
+    return StructuredText.fromJson(jsonDecode(text) as Map<String, dynamic>);
+  }
 
   /// Highlights + notes for a book.
   Future<List<Annotation>> annotations(String bookId) async {

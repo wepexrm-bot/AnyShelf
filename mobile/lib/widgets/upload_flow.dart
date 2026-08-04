@@ -489,7 +489,16 @@ class _UploadFormDialogState extends State<_UploadFormDialog> {
                 ),
               ),
               if (hasCover)
-                Image.memory(_coverBytes!, fit: BoxFit.cover)
+                Image(
+                  // The preview box is 132px tall; decode the picked image at
+                  // display resolution instead of holding the full bitmap.
+                  image: ResizeImage(
+                    MemoryImage(_coverBytes!),
+                    width: (132 * MediaQuery.devicePixelRatioOf(context))
+                        .round(),
+                  ),
+                  fit: BoxFit.cover,
+                )
               else
                 Column(
                   mainAxisAlignment: MainAxisAlignment.center,

@@ -1222,6 +1222,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
         ],
       ),
     );
+    ctl.dispose();
     if (note == null || note.trim().isEmpty) {
       if (mounted) setState(() => _highlightMenu = null);
       return;
@@ -1473,6 +1474,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
         ],
       ),
     );
+    ctl.dispose();
     final page = int.tryParse(input ?? '');
     if (page == null || page < 1 || page > _totalUnits) return;
     final target = page - 1;
@@ -1537,6 +1539,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
         ],
       ),
     );
+    ctl.dispose();
     if (query == null || query.trim().isEmpty) return;
 
     final q = query.trim().toLowerCase();

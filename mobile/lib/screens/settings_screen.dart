@@ -124,6 +124,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
       ),
     );
+    oldCtl.dispose();
+    newCtl.dispose();
+    confirmCtl.dispose();
     if (ok == true && mounted) {
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('Password changed successfully.')));

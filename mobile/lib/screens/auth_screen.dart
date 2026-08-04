@@ -95,14 +95,17 @@ class _AuthScreenState extends State<AuthScreen> {
       ),
     );
     if (sent != true) return;
+    final email = emailCtl.text.trim();
     try {
-      await _auth.forgotPassword(emailCtl.text.trim());
+      await _auth.forgotPassword(email);
       _toast('If that email exists, a verification code was sent.');
     } on ApiException catch (e) {
       _toast(e.message);
+      return; // don't ask for a code that was never sent
     }
+    emailCtl.dispose();
     if (!mounted) return;
-    await _resetPasswordFlow(emailCtl.text.trim());
+    await _resetPasswordFlow(email);
   }
 
   Future<void> _resetPasswordFlow(String email) async {
@@ -140,12 +143,16 @@ class _AuthScreenState extends State<AuthScreen> {
         ],
       ),
     );
+    final token = tokenCtl.text.trim();
+    final password = passCtl.text;
+    tokenCtl.dispose();
+    passCtl.dispose();
     if (confirmed != true) return;
     try {
       await _auth.resetPassword(
         email: email,
-        token: tokenCtl.text.trim(),
-        password: passCtl.text,
+        token: token,
+        password: password,
       );
       _toast('Password reset. You can sign in now.');
     } on ApiException catch (e) {

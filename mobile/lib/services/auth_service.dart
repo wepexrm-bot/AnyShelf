@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'api_client.dart';
 
 class AuthService {
@@ -35,8 +37,41 @@ class AuthService {
     await api.setToken(null);
   }
 
-  Future<bool> hasSession() async =>
-      (await api.getToken())?.isNotEmpty ?? false;
+  /// A session only counts if a token is stored *and* it hasn't expired. The
+  /// backend issues JWT access tokens with a fixed lifetime, so a stale token
+  /// lingering in storage must not boot the user into the library.
+  Future<bool> hasSession() async {
+    final token = await api.getToken();
+    if (token == null || token.isEmpty) return false;
+    final exp = _jwtExpiry(token);
+    if (exp == null) return true; // non-JWT token: fall back to presence
+    if (exp.isAfter(DateTime.now().toUtc())) return true;
+    await api.setToken(null);
+    return false;
+  }
+
+  /// Reads the JWT `exp` claim without verifying the signature — the timestamp
+  /// lives in the base64 payload segment, so it's safe to parse locally.
+  static DateTime? _jwtExpiry(String token) {
+    try {
+      final parts = token.split('.');
+      if (parts.length != 3) return null;
+      final payload = jsonDecode(
+        utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))),
+      ) as Map<String, dynamic>;
+      final exp = payload['exp'];
+      if (exp is int) {
+        return DateTime.fromMillisecondsSinceEpoch(exp * 1000, isUtc: true);
+      }
+      if (exp is num) {
+        return DateTime.fromMillisecondsSinceEpoch(
+          (exp * 1000).round(),
+          isUtc: true,
+        );
+      }
+    } catch (_) {}
+    return null;
+  }
 
   Future<Map<String, dynamic>> forgotPassword(String email) async {
     final data = await api
