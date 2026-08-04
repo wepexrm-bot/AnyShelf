@@ -4,6 +4,7 @@ import Sidebar from "./Sidebar";
 import { api } from "../api";
 import { useAuth } from "../auth";
 import AppHeader from "./AppHeader";
+import PasswordInput from "./PasswordInput";
 import { useUiMode } from "../uiMode";
 
 export default function SettingsPage() {
@@ -131,9 +132,8 @@ export default function SettingsPage() {
         <form onSubmit={handleChangePassword} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <div className="field">
             <label htmlFor="old">Current password</label>
-            <input
+            <PasswordInput
               id="old"
-              type="password"
               required
               value={oldPassword}
               onChange={(e) => setOldPassword(e.target.value)}
@@ -141,9 +141,8 @@ export default function SettingsPage() {
           </div>
           <div className="field">
             <label htmlFor="new">New password</label>
-            <input
+            <PasswordInput
               id="new"
-              type="password"
               required
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
@@ -151,9 +150,8 @@ export default function SettingsPage() {
           </div>
           <div className="field">
             <label htmlFor="confirm">Confirm new password</label>
-            <input
+            <PasswordInput
               id="confirm"
-              type="password"
               required
               value={confirm}
               onChange={(e) => setConfirm(e.target.value)}

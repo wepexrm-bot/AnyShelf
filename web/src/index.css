@@ -252,6 +252,34 @@ textarea {
   gap: 6px;
 }
 
+.password-input {
+  position: relative;
+}
+.password-input input {
+  width: 100%;
+  padding-right: 44px;
+}
+.password-input__toggle {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--on-surface-variant);
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.password-input__toggle:hover {
+  background: var(--surface-container-high);
+}
+
 .field label {
   font-size: 12px;
   font-weight: 500;

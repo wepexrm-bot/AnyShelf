@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import AuthShell from "./AuthShell";
+import PasswordInput from "./PasswordInput";
 import { api } from "../api";
 
 export default function ResetPasswordPage() {
@@ -94,9 +95,8 @@ export default function ResetPasswordPage() {
           </div>
           <div className="field">
             <label htmlFor="password">New password</label>
-            <input
+            <PasswordInput
               id="password"
-              type="password"
               required
               value={password}
               onChange={(e) => setPassword(e.target.value)}
@@ -105,9 +105,8 @@ export default function ResetPasswordPage() {
           </div>
           <div className="field">
             <label htmlFor="confirm">Confirm new password</label>
-            <input
+            <PasswordInput
               id="confirm"
-              type="password"
               required
               value={confirm}
               onChange={(e) => setConfirm(e.target.value)}

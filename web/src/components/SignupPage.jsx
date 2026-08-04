@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import AuthShell from "./AuthShell";
+import PasswordInput from "./PasswordInput";
 import { useAuth } from "../auth";
 
 export default function SignupPage() {
@@ -70,9 +71,8 @@ export default function SignupPage() {
         </div>
         <div className="field">
           <label htmlFor="password">Password</label>
-          <input
+          <PasswordInput
             id="password"
-            type="password"
             required
             value={password}
             onChange={(e) => setPassword(e.target.value)}
@@ -81,9 +81,8 @@ export default function SignupPage() {
         </div>
         <div className="field">
           <label htmlFor="confirm">Confirm password</label>
-          <input
+          <PasswordInput
             id="confirm"
-            type="password"
             required
             value={confirm}
             onChange={(e) => setConfirm(e.target.value)}
