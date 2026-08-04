@@ -220,3 +220,7 @@ pytest
 ## Product spec
 
 See `docs/feature-spec.md` for the full product spec and roadmap.
+
+## License
+
+Released under the [MIT License](LICENSE). Copyright (c) 2026 WepexRM.
