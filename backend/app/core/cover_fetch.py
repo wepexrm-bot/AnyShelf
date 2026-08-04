@@ -6,8 +6,11 @@ callers should leave the book without a cover rather than substituting
 anything synthetic.
 
 Tries, in order:
-  1. Google Books API (best hit rate, no key required for basic search)
-  2. Open Library (fallback, also keyless)
+  1. Open Library (keyless, reliable, no aggressive rate limiting) --
+     full-text search with a title-match preference, then fetches the cover
+     image. Covers API returns a 302 redirect, so redirects are followed.
+  2. Google Books API (best hit rate, no key required) -- with one retry on
+     transient/rate-limit responses, since it throttles keyless callers.
 
 Both calls are best-effort: network errors, rate limits, or no-match results
 are all treated the same way -- log and return None. A cover lookup failing
@@ -16,7 +19,9 @@ should never fail the book upload itself.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 
 import httpx
 
@@ -26,8 +31,13 @@ GOOGLE_BOOKS_API = "https://www.googleapis.com/books/v1/volumes"
 OPEN_LIBRARY_SEARCH = "https://openlibrary.org/search.json"
 OPEN_LIBRARY_COVER = "https://covers.openlibrary.org/b/id/{cover_id}-L.jpg"
 
-_TIMEOUT = httpx.Timeout(6.0, connect=3.0)
+_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 _HEADERS = {"User-Agent": "AnyShelf/1.0 (cover lookup; contact: support@anyshelf.app)"}
+_MIN_IMAGE_BYTES = 1000  # Open Library serves a 1x1 GIF for covers it lacks
+
+
+def _normalize(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip().lower())
 
 
 async def fetch_cover(title: str, author: str) -> tuple[bytes, str] | None:
@@ -41,8 +51,8 @@ async def fetch_cover(title: str, author: str) -> tuple[bytes, str] | None:
     if not title:
         return None
 
-    async with httpx.AsyncClient(timeout=_TIMEOUT, headers=_HEADERS) as client:
-        for lookup in (_try_google_books, _try_open_library):
+    async with httpx.AsyncClient(timeout=_TIMEOUT, headers=_HEADERS, follow_redirects=True) as client:
+        for lookup in (_try_open_library, _try_google_books):
             try:
                 result = await lookup(client, title, author)
             except httpx.HTTPError as exc:
@@ -53,11 +63,62 @@ async def fetch_cover(title: str, author: str) -> tuple[bytes, str] | None:
     return None
 
 
+async def _fetch_cover_image(client: httpx.AsyncClient, url: str) -> tuple[bytes, str] | None:
+    """Download a cover image, filtering out Open Library's blank 1x1 GIFs."""
+    img_resp = await client.get(url)
+    img_resp.raise_for_status()
+    if len(img_resp.content) < _MIN_IMAGE_BYTES:
+        return None
+    return img_resp.content, img_resp.headers.get("content-type", "image/jpeg")
+
+
+async def _try_open_library(
+    client: httpx.AsyncClient, title: str, author: str
+) -> tuple[bytes, str] | None:
+    # Full-text search finds real editions with covers, where the fielded
+    # `title=` query often returns bare, coverless text editions.
+    params = {"q": f"{title} {author}".strip(), "limit": 10}
+    resp = await client.get(OPEN_LIBRARY_SEARCH, params=params)
+    resp.raise_for_status()
+    docs = resp.json().get("docs") or []
+    if not docs:
+        return None
+
+    want = _normalize(title)
+
+    def match_rank(doc: dict) -> int:
+        doc_title = _normalize(doc.get("title") or "")
+        if doc_title == want:
+            return 0
+        if want and want in doc_title:
+            return 1
+        return 2
+
+    # Prefer editions whose title actually matches (avoids wrong-language or
+    # unrelated hits like "Das Schloss" for an English "The Castle").
+    for doc in sorted(docs, key=match_rank):
+        cover_id = doc.get("cover_i")
+        if not cover_id:
+            continue
+        result = await _fetch_cover_image(client, OPEN_LIBRARY_COVER.format(cover_id=cover_id))
+        if result:
+            return result
+    return None
+
+
 async def _try_google_books(
     client: httpx.AsyncClient, title: str, author: str
 ) -> tuple[bytes, str] | None:
     query = f'intitle:"{title}"' + (f' inauthor:"{author}"' if author else "")
-    resp = await client.get(GOOGLE_BOOKS_API, params={"q": query, "maxResults": 1})
+    resp = None
+    for attempt in range(2):  # Google throttles keyless callers; retry once
+        resp = await client.get(GOOGLE_BOOKS_API, params={"q": query, "maxResults": 1})
+        if resp.status_code in (429, 500, 502, 503, 504):
+            await asyncio.sleep(1.0 + attempt)
+            continue
+        break
+    if resp is None or resp.status_code in (429, 500, 502, 503, 504):
+        return None
     resp.raise_for_status()
     items = resp.json().get("items") or []
     if not items:
@@ -70,31 +131,4 @@ async def _try_google_books(
         return None
 
     cover_url = cover_url.replace("http://", "https://")
-    img_resp = await client.get(cover_url)
-    img_resp.raise_for_status()
-    return img_resp.content, img_resp.headers.get("content-type", "image/jpeg")
-
-
-async def _try_open_library(
-    client: httpx.AsyncClient, title: str, author: str
-) -> tuple[bytes, str] | None:
-    params = {"title": title, "limit": 1}
-    if author:
-        params["author"] = author
-    resp = await client.get(OPEN_LIBRARY_SEARCH, params=params)
-    resp.raise_for_status()
-    docs = resp.json().get("docs") or []
-    if not docs:
-        return None
-
-    cover_id = docs[0].get("cover_i")
-    if not cover_id:
-        return None
-
-    img_resp = await client.get(OPEN_LIBRARY_COVER.format(cover_id=cover_id))
-    img_resp.raise_for_status()
-    # Open Library serves a tiny 1x1 GIF for editions with no real cover
-    # image instead of a 404 -- filter those out rather than storing them.
-    if len(img_resp.content) < 1000:
-        return None
-    return img_resp.content, img_resp.headers.get("content-type", "image/jpeg")
+    return await _fetch_cover_image(client, cover_url)
