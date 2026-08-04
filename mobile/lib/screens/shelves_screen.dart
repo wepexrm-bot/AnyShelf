@@ -32,6 +32,7 @@ class _ShelvesScreenState extends State<ShelvesScreen> {
   List<Shelf> _shelves = [];
   List<Book> _books = [];
   bool _loading = true;
+  int _loadEpoch = 0;
 
   @override
   void initState() {
@@ -47,20 +48,21 @@ class _ShelvesScreenState extends State<ShelvesScreen> {
   }
 
   Future<void> _load() async {
+    final epoch = ++_loadEpoch;
     setState(() => _loading = true);
     try {
       final results = await Future.wait<dynamic>([
         _shelvesService.list(),
         _booksService.list(),
       ]);
-      if (!mounted) return;
+      if (!mounted || epoch != _loadEpoch) return;
       setState(() {
         _shelves = results[0] as List<Shelf>;
         _books = results[1] as List<Book>;
         _loading = false;
       });
     } catch (_) {
-      if (!mounted) return;
+      if (!mounted || epoch != _loadEpoch) return;
       setState(() => _loading = false);
     }
   }
@@ -76,8 +78,7 @@ class _ShelvesScreenState extends State<ShelvesScreen> {
         ),
       ),
     );
-    if (changed == true) _load();
-    LibraryRefresh.instance.bump();
+    if (changed == true) LibraryRefresh.instance.bump();
   }
 
   Future<void> _createShelf() async {

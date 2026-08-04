@@ -118,10 +118,10 @@ class UploadFlow {
     }
 
     try {
-      final bytes = await file.readAsBytes();
       await BooksService().upload(
         filename: file.name,
-        bytes: bytes,
+        fileStream: file.openRead(),
+        fileLength: await file.length(),
         title: meta.title,
         author: meta.author,
         genre: meta.genre,

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
@@ -23,6 +24,18 @@ class ApiClient {
 
   final String baseUrl;
   ApiClient({String? baseUrl}) : baseUrl = baseUrl ?? defaultBase;
+
+  static const Duration _timeout = Duration(seconds: 30);
+
+  static String _friendlyError(Object error) {
+    if (error is TimeoutException) {
+      return 'Request timed out. Check your connection and try again.';
+    }
+    if (error is http.ClientException) {
+      return 'Network error. Check your connection and try again.';
+    }
+    return 'Something went wrong. Check your connection and try again.';
+  }
 
   Future<Map<String, String>> _headers({bool json = true}) async {
     final h = <String, String>{'Accept': 'application/json'};
@@ -96,8 +109,13 @@ class ApiClient {
     if (token != null && token.isNotEmpty) {
       req.headers['Authorization'] = 'Bearer $token';
     }
-    final streamed = await req.send();
-    final res = await http.Response.fromStream(streamed);
+    final http.StreamedResponse streamed;
+    try {
+      streamed = await req.send().timeout(_timeout);
+    } catch (e) {
+      throw ApiException(0, _friendlyError(e));
+    }
+    final res = await http.Response.fromStream(streamed).timeout(_timeout);
 
     dynamic decoded;
     if (res.body.isNotEmpty) {
@@ -125,15 +143,19 @@ class ApiClient {
   }) async {
     final uri = Uri.parse('$baseUrl$path');
     late http.Response res;
-    switch (method) {
-      case 'GET':
-        res = await http.get(uri, headers: headers);
-      case 'PUT':
-        res = await http.put(uri, headers: headers, body: body);
-      case 'DELETE':
-        res = await http.delete(uri, headers: headers, body: body);
-      default:
-        res = await http.post(uri, headers: headers, body: body);
+    try {
+      switch (method) {
+        case 'GET':
+          res = await http.get(uri, headers: headers).timeout(_timeout);
+        case 'PUT':
+          res = await http.put(uri, headers: headers, body: body).timeout(_timeout);
+        case 'DELETE':
+          res = await http.delete(uri, headers: headers, body: body).timeout(_timeout);
+        default:
+          res = await http.post(uri, headers: headers, body: body).timeout(_timeout);
+      }
+    } catch (e) {
+      throw ApiException(0, _friendlyError(e));
     }
 
     dynamic decoded;

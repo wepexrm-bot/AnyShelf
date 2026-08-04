@@ -47,6 +47,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   bool _loading = true;
   String? _error;
   Timer? _saveTimer;
+  ReaderSettings? _pendingSettings;
 
   // Text-extraction status: while a freshly uploaded book is still being
   // processed the structured text isn't ready, so we show a looping extraction
@@ -134,12 +135,23 @@ class _ReaderScreenState extends State<ReaderScreen> {
   @override
   void dispose() {
     _flushProgressSave();
-    _saveTimer?.cancel();
+    _flushSettingsSave();
     _paginateTimer?.cancel();
     _extractionTimer?.cancel();
     _scrollController.dispose();
     _progressNotifier.dispose();
     super.dispose();
+  }
+
+  /// Persist a debounced settings save that hadn't fired yet, so the last
+  /// appearance/mode change is never lost to the 400ms debounce timer.
+  void _flushSettingsSave() {
+    _saveTimer?.cancel();
+    final pending = _pendingSettings;
+    _pendingSettings = null;
+    if (pending != null) {
+      _settingsService.save(pending);
+    }
   }
 
   /// Persist the current reading position immediately, cancelling any pending
@@ -220,8 +232,16 @@ class _ReaderScreenState extends State<ReaderScreen> {
   /// animation shows until the poll reports "done", then we reload to pull
   /// the now-available structured text.
   void _maybeExtractPoll() {
-    if (_structured != null) return;
-    if (_extractionStatus == 'done' || _extractionStatus == 'failed') return;
+    if (_structured != null) {
+      _extractionTimer?.cancel();
+      _extractionTimer = null;
+      return;
+    }
+    if (_extractionStatus == 'done' || _extractionStatus == 'failed') {
+      _extractionTimer?.cancel();
+      _extractionTimer = null;
+      return;
+    }
     _extractionTimer?.cancel();
     _extractionTimer = Timer.periodic(const Duration(seconds: 2), (_) => _pollExtraction());
   }
@@ -278,8 +298,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
     }
     _saveTimer?.cancel();
     _saveTimer = Timer(const Duration(milliseconds: 400), () {
+      _pendingSettings = null;
       _settingsService.save(next);
     });
+    _pendingSettings = next;
   }
 
   /// Finds the synced bookmark annotation id for this book, if one exists.
@@ -1073,6 +1095,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       if (mounted) setState(() => _highlightMenu = null);
       return;
     }
+    if (!mounted) return;
     setState(() => _highlightMenu = null);
     _booksService.api.post('/sync/annotations', body: {
       'book_id': widget.book.id,

@@ -30,6 +30,7 @@ class _BooksScreenState extends State<BooksScreen> {
   List<Shelf> _shelves = [];
   bool _loading = true;
   String? _error;
+  int _loadEpoch = 0;
 
   String _genre = '';
   _BooksSort _sort = _BooksSort.newest;
@@ -48,6 +49,7 @@ class _BooksScreenState extends State<BooksScreen> {
   }
 
   Future<void> _load() async {
+    final epoch = ++_loadEpoch;
     setState(() {
       _loading = true;
       _error = null;
@@ -65,7 +67,7 @@ class _BooksScreenState extends State<BooksScreen> {
           progress[b.id] = await _booksService.progress(b.id);
         } catch (_) {}
       }));
-      if (!mounted) return;
+      if (!mounted || epoch != _loadEpoch) return;
       setState(() {
         _books = [
           for (final b in books)
@@ -74,7 +76,7 @@ class _BooksScreenState extends State<BooksScreen> {
         _loading = false;
       });
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || epoch != _loadEpoch) return;
       setState(() {
         _error = '$e';
         _loading = false;
@@ -111,7 +113,6 @@ class _BooksScreenState extends State<BooksScreen> {
         genre: meta.genre,
       );
       LibraryRefresh.instance.bump();
-      await _load();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Book updated')),
@@ -167,7 +168,6 @@ class _BooksScreenState extends State<BooksScreen> {
     try {
       await _booksService.api.delete('/books/${book.id}');
       LibraryRefresh.instance.bump();
-      await _load();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -186,7 +186,6 @@ class _BooksScreenState extends State<BooksScreen> {
       floatingActionButton: FloatingActionButton(
         onPressed: () => UploadFlow.showAddSheet(context, onUploaded: () async {
           LibraryRefresh.instance.bump();
-          await _load();
         }),
         backgroundColor: colors.primaryContainer,
         foregroundColor: colors.onPrimaryContainer,
@@ -380,6 +379,7 @@ class _BooksScreenState extends State<BooksScreen> {
         ],
       ),
     );
+    if (!mounted) return;
     if (selected != null) setState(() => _genre = selected);
   }
 
@@ -404,6 +404,7 @@ class _BooksScreenState extends State<BooksScreen> {
         ),
       ),
     );
+    if (!mounted) return;
     if (selected != null) setState(() => _sort = selected);
   }
 }

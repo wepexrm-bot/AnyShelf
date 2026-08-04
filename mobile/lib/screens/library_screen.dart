@@ -33,6 +33,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   List<Book> _books = [];
   List<Shelf> _shelves = [];
   bool _loading = true;
+  int _loadEpoch = 0;
 
   static const double _completedFraction = 0.995;
 
@@ -50,6 +51,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _load() async {
+    final epoch = ++_loadEpoch;
     setState(() => _loading = true);
     try {
       final books = await _booksService.list();
@@ -60,7 +62,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         } catch (_) {}
       }));
       final shelves = await _shelvesService.list();
-      if (!mounted) return;
+      if (!mounted || epoch != _loadEpoch) return;
       setState(() {
         _books = [
           for (final b in books)
@@ -70,7 +72,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         _loading = false;
       });
     } catch (_) {
-      if (!mounted) return;
+      if (!mounted || epoch != _loadEpoch) return;
       setState(() => _loading = false);
     }
   }
@@ -116,7 +118,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
     try {
       await _booksService.api.delete('/books/${book.id}');
       LibraryRefresh.instance.bump();
-      await _load();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -135,7 +136,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
       floatingActionButton: FloatingActionButton(
         onPressed: () => UploadFlow.showAddSheet(context, onUploaded: () async {
           LibraryRefresh.instance.bump();
-          await _load();
         }),
         backgroundColor: colors.primaryContainer,
         foregroundColor: colors.onPrimaryContainer,

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -27,11 +28,13 @@ class BooksService {
     'Non-Fiction', 'Other',
   ];
 
-  /// Uploads a PDF file with metadata and an optional cover image. Returns the
-  /// uploaded book payload.
+  /// Uploads a PDF file with metadata and an optional cover image. The PDF is
+  /// streamed from [fileStream] so large files never need to be fully buffered
+  /// in memory. Returns the uploaded book payload.
   Future<Map<String, dynamic>> upload({
     required String filename,
-    required Uint8List bytes,
+    required Stream<List<int>> fileStream,
+    required int fileLength,
     required String title,
     required String author,
     String? genre,
@@ -39,7 +42,13 @@ class BooksService {
     String? coverName,
   }) async {
     final files = <http.MultipartFile>[
-      http.MultipartFile.fromBytes('file', bytes, filename: filename),
+      http.MultipartFile(
+        'file',
+        fileStream,
+        fileLength,
+        filename: filename,
+        contentType: MediaType('application', 'pdf'),
+      ),
       if (coverBytes != null && coverBytes.isNotEmpty)
         http.MultipartFile.fromBytes(
           'cover',
@@ -141,9 +150,11 @@ class BooksService {
   Future<StructuredText?> structuredText(Book book) async {
     final url = book.structuredTextUrl;
     if (url == null) return null;
-    final res = await http.get(Uri.parse(url)); // pre-signed URL, no auth
-    if (res.statusCode != 200 || res.body.isEmpty) return null;
     try {
+      final res = await http
+          .get(Uri.parse(url))
+          .timeout(const Duration(seconds: 30)); // pre-signed URL, no auth
+      if (res.statusCode != 200 || res.body.isEmpty) return null;
       // Decode off the UI isolate so large books don't jank the reader open.
       return await compute(_decodeStructuredText, res.body);
     } catch (_) {
@@ -166,12 +177,17 @@ class BooksService {
   /// Aggregated annotations across the whole library (the Notes tab).
   Future<Map<String, List<Annotation>>> allAnnotations() async {
     final books = await list();
-    final result = <String, List<Annotation>>{};
-    for (final b in books) {
+    final entries = await Future.wait(books.map((b) async {
       try {
         final notes = await annotations(b.id);
-        if (notes.isNotEmpty) result[b.id] = notes;
-      } catch (_) {}
+        return MapEntry(b.id, notes);
+      } catch (_) {
+        return MapEntry(b.id, const <Annotation>[]);
+      }
+    }));
+    final result = <String, List<Annotation>>{};
+    for (final e in entries) {
+      if (e.value.isNotEmpty) result[e.key] = e.value;
     }
     return result;
   }
