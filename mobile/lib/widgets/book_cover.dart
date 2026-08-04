@@ -38,18 +38,12 @@ class BookCover extends StatelessWidget {
               constraints.maxWidth * MediaQuery.devicePixelRatioOf(context);
           final cacheWidth =
               rawW.isFinite && rawW > 0 ? rawW.round() : null;
-          final provider = StableNetworkImage(book.coverUrl!);
+          final coverUrl = book.coverUrl;
           return Stack(
             fit: StackFit.expand,
             children: [
-              if (book.coverUrl != null && book.coverUrl!.isNotEmpty)
-                Image(
-                  image: cacheWidth != null
-                      ? ResizeImage(provider, width: cacheWidth)
-                      : provider,
-                  fit: BoxFit.cover,
-                  errorBuilder: (_, __, ___) => _placeholder(scheme),
-                )
+              if (coverUrl != null && coverUrl.isNotEmpty)
+                _coverImage(cacheWidth, coverUrl, scheme)
               else
                 _placeholder(scheme),
               const DecoratedBox(
@@ -80,6 +74,17 @@ class BookCover extends StatelessWidget {
 
     if (onTap == null) return cover;
     return GestureDetector(onTap: onTap, child: cover);
+  }
+
+  Widget _coverImage(int? cacheWidth, String url, ColorScheme scheme) {
+    final provider = StableNetworkImage(url);
+    return Image(
+      image: cacheWidth != null
+          ? ResizeImage(provider, width: cacheWidth)
+          : provider,
+      fit: BoxFit.cover,
+      errorBuilder: (_, __, ___) => _placeholder(scheme),
+    );
   }
 
   Widget _placeholder(ColorScheme scheme) => ColoredBox(

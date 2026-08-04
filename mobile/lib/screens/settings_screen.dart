@@ -54,79 +54,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _changePassword() async {
-    final oldCtl = TextEditingController();
-    final newCtl = TextEditingController();
-    final confirmCtl = TextEditingController();
-    String? error;
-    final errorColor =
-        Theme.of(context).extension<SereneTheme>()!.colors.error;
-
     final ok = await showDialog<bool>(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          title: const Text('Change Password'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: oldCtl,
-                obscureText: true,
-                decoration: const InputDecoration(labelText: 'Current password'),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: newCtl,
-                obscureText: true,
-                decoration: const InputDecoration(labelText: 'New password'),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: confirmCtl,
-                obscureText: true,
-                decoration: const InputDecoration(labelText: 'Confirm new password'),
-              ),
-              if (error != null) ...[
-                const SizedBox(height: 10),
-                Text(error!, style: SereneType.labelSm.copyWith(color: errorColor)),
-              ],
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () async {
-                final newPassword = newCtl.text;
-                if (newPassword.length < 8) {
-                  setDialogState(() => error = 'New password must be at least 8 characters.');
-                  return;
-                }
-                if (newPassword != confirmCtl.text) {
-                  setDialogState(() => error = 'New passwords do not match.');
-                  return;
-                }
-                try {
-                  await _auth.api.post('/auth/change-password', body: {
-                    'old_password': oldCtl.text,
-                    'new_password': newPassword,
-                  });
-                  if (context.mounted) Navigator.pop(context, true);
-                } on ApiException catch (e) {
-                  setDialogState(() => error = e.message);
-                }
-              },
-              child: const Text('Update'),
-            ),
-          ],
-        ),
-      ),
+      builder: (_) => const _ChangePasswordDialog(),
     );
-    oldCtl.dispose();
-    newCtl.dispose();
-    confirmCtl.dispose();
     if (ok == true && mounted) {
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('Password changed successfully.')));
@@ -337,6 +268,106 @@ class _ReadOnlyField extends StatelessWidget {
             style: SereneType.labelSm.copyWith(color: colors.onSurfaceVariant)),
         const SizedBox(height: 4),
         Text(value, style: SereneType.uiBody.copyWith(color: colors.onSurface)),
+      ],
+    );
+  }
+}
+
+/// Owns the password fields' controllers so they are disposed only once the
+/// route has fully unmounted. Disposing them right after `showDialog` returns
+/// races the route's exit animation while its TextFields are still mounted,
+/// which can tear down dependent elements mid-frame. The scrollable content
+/// also keeps the fields reachable when the keyboard shrinks the dialog.
+class _ChangePasswordDialog extends StatefulWidget {
+  const _ChangePasswordDialog();
+
+  @override
+  State<_ChangePasswordDialog> createState() => _ChangePasswordDialogState();
+}
+
+class _ChangePasswordDialogState extends State<_ChangePasswordDialog> {
+  final _auth = AuthService();
+  final _oldCtl = TextEditingController();
+  final _newCtl = TextEditingController();
+  final _confirmCtl = TextEditingController();
+  String? _error;
+
+  @override
+  void dispose() {
+    _oldCtl.dispose();
+    _newCtl.dispose();
+    _confirmCtl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final newPassword = _newCtl.text;
+    if (newPassword.length < 8) {
+      setState(() => _error = 'New password must be at least 8 characters.');
+      return;
+    }
+    if (newPassword != _confirmCtl.text) {
+      setState(() => _error = 'New passwords do not match.');
+      return;
+    }
+    setState(() => _error = null);
+    try {
+      await _auth.api.post('/auth/change-password', body: {
+        'old_password': _oldCtl.text,
+        'new_password': newPassword,
+      });
+      if (mounted) Navigator.pop(context, true);
+    } on ApiException catch (e) {
+      if (mounted) setState(() => _error = e.message);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final errorColor = Theme.of(context).extension<SereneTheme>()!.colors.error;
+    return AlertDialog(
+      title: const Text('Change Password'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: _oldCtl,
+              obscureText: true,
+              textInputAction: TextInputAction.next,
+              decoration: const InputDecoration(labelText: 'Current password'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _newCtl,
+              obscureText: true,
+              textInputAction: TextInputAction.next,
+              decoration: const InputDecoration(labelText: 'New password'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _confirmCtl,
+              obscureText: true,
+              textInputAction: TextInputAction.done,
+              onSubmitted: (_) => _submit(),
+              decoration: const InputDecoration(labelText: 'Confirm new password'),
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: 10),
+              Text(_error!, style: SereneType.labelSm.copyWith(color: errorColor)),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _submit,
+          child: const Text('Update'),
+        ),
       ],
     );
   }
