@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/shelf.dart';
 import '../theme/serene_theme.dart';
 import '../theme/serene_tokens.dart';
+import 'stable_network_image.dart';
 
 const List<String> kShelfColorPalette = [
   '#154212',
@@ -24,7 +25,15 @@ Color shelfColorFromHex(String? hex, {required Color fallback}) {
       ? cleaned.split('').map((c) => '$c$c').join()
       : cleaned;
   final v = int.tryParse(full, radix: 16);
-  return v == null ? fallback : Color(0xFF000000 | v);
+  if (v == null) return fallback;
+  if (full.length == 8) {
+    // CSS-style #RRGGBBAA (alpha last) -> Flutter's #AARRGGBB. Treating the
+    // raw value as opaque would shift every channel and drop the alpha.
+    final alpha = v & 0xFF;
+    final rgb = v >> 8;
+    return Color((alpha << 24) | rgb);
+  }
+  return Color(0xFF000000 | v);
 }
 
 /// A shelf cover panel: the shelf colour (or banner image) with a name badge
@@ -51,7 +60,8 @@ class ShelfCover extends StatelessWidget {
           BoxShadow(color: Color(0x22000000), blurRadius: 14, offset: Offset(0, 4)),
         ],
         image: hasBanner
-            ? DecorationImage(image: NetworkImage(shelf.bannerUrl!), fit: BoxFit.cover)
+            ? DecorationImage(
+                image: StableNetworkImage(shelf.bannerUrl!), fit: BoxFit.cover)
             : null,
         gradient: hasBanner
             ? null

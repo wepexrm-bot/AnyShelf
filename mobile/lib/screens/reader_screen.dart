@@ -56,8 +56,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
   double? _extractionProgress;
   Timer? _extractionTimer;
 
-  // cached, time-sliced pagination state
-  List<List<(TextBlock, int)>>? _pages;
+  // cached, time-sliced pagination state. Each entry's index is a (possibly
+  // fractional) block anchor so chunks of a split paragraph are addressable
+  // instead of all claiming the same block index.
+  List<List<(TextBlock, double)>>? _pages;
   String? _pagesKey;
   Timer? _paginateTimer;
   bool _paginating = false;
@@ -77,8 +79,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   // The exact block the reader is anchored on when switching modes. Captured
   // at the moment of the switch so scroll & paginated views can both resolve to
-  // the same content instead of a fuzzy progress fraction that drifts a chapter.
-  int? _anchorBlock;
+  // the same content instead of a fuzzy progress fraction that drifts a chunk.
+  // Fractional for paragraphs split across pages (see [_paginateInChunks]).
+  double? _anchorBlock;
 
   // Annotations loaded from the backend, cached for the panel. Populated
   // lazily so the banner badge and the Highlights & Notes sheet can render
@@ -90,22 +93,30 @@ class _ReaderScreenState extends State<ReaderScreen> {
   int _pageCount = 0;
 
   // Single source of truth for reading position across both modes: the global
-  // block index currently on screen. Scroll maps the viewport to a block,
-  // pagination maps the page to its first block, and the progress bar (and
-  // saved fraction) is always derived from this same block index. This is what
-  // keeps scroll and paginated views reporting the same progress.
-  int? _currentBlock;
+  // block index currently on screen (fractional for split-paragraph pages).
+  // Scroll maps the viewport to a block, pagination maps the page to its first
+  // block, and the progress bar (and saved fraction) is always derived from
+  // this same index. This is what keeps scroll and paginated views reporting
+  // the same progress.
+  double? _currentBlock;
 
   // Bumped on every mode switch so the paginated view remounts onto the
   // anchored block instead of reusing stale flip state.
   int _anchorSeed = 0;
 
   // Cached table of scroll offsets for every block. Computing it lays out the
-  // whole book with TextPainters (expensive), so it must not run per scroll
-  // frame. Rebuilt only when the layout-affecting settings (font, size, line
-  // height, content width) change.
+  // whole book with TextPainters (expensive), so it is time-sliced across
+  // frames rather than blocking the UI thread in one burst, and cached by the
+  // settings that affect layout. While the table is (re)building it reads as
+  // empty and callers fall back to fraction-based positioning.
   List<double>? _blockOffsetsCache;
   String? _blockOffsetsCacheKey;
+  bool _blockOffsetsBuilding = false;
+  Timer? _blockOffsetsTimer;
+
+  // Set when a scroll restore has to wait for the offset table to finish
+  // building before it can land on the exact block.
+  double? _pendingScrollRestore;
 
   final ValueNotifier<double> _progressNotifier = ValueNotifier(0);
 
@@ -138,6 +149,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     _flushSettingsSave();
     _paginateTimer?.cancel();
     _extractionTimer?.cancel();
+    _blockOffsetsTimer?.cancel();
     _scrollController.dispose();
     _progressNotifier.dispose();
     super.dispose();
@@ -218,6 +230,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
       }
       _maybeExtractPoll();
       _applySavedHighlights();
+      // Pre-warm the offset table so the first scroll restore/jump after open
+      // doesn't wait for the time-sliced build.
+      _warmBlockOffsets();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -294,8 +309,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
           _blockOffsetsCacheKey = null;
         });
         _syncBlockFromScroll();
+        _warmBlockOffsets();
       });
     }
+    _warmBlockOffsets();
     _saveTimer?.cancel();
     _saveTimer = Timer(const Duration(milliseconds: 400), () {
       _pendingSettings = null;
@@ -626,8 +643,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
       final block = _fractionToBlock(_progress);
       target = block != null ? _scrollOffsetForBlock(block) : (_progress * max);
     }
+    if (target == null) {
+      // The offset table is still building; retry the restore once it lands.
+      _pendingScrollRestore = _progress;
+      return;
+    }
     _restoringScroll = true;
-    _scrollController.jumpTo((target ?? 0).clamp(0.0, max));
+    _scrollController.jumpTo(target.clamp(0.0, max));
     _anchorBlock = null;
     // Re-derive the block from the new viewport so progress matches, including
     // the top 10% padding that pixel math ignores. Persisting stays suppressed
@@ -639,11 +661,34 @@ class _ReaderScreenState extends State<ReaderScreen> {
     });
   }
 
+  /// Completes a scroll restore that had to wait for the offset table to
+  /// finish building.
+  void _applyPendingScrollRestore() {
+    final pending = _pendingScrollRestore;
+    if (pending == null) return;
+    _pendingScrollRestore = null;
+    if (!_scrollController.hasClients) return;
+    final max = _scrollController.position.maxScrollExtent;
+    if (max <= 0) return;
+    final block = _fractionToBlock(pending);
+    final target = block != null ? _scrollOffsetForBlock(block) : pending * max;
+    if (target == null) return;
+    _restoringScroll = true;
+    _scrollController.jumpTo(target.clamp(0.0, max));
+    _syncBlockFromScroll();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _restoringScroll = false;
+    });
+  }
+
   /// Build a table of the top offset of every reflowed block, measured the
   /// same way the paginator measures them (TextPainter + the same bottom
   /// padding as [_buildBlock]), so a block index maps deterministically to a
-  /// scroll pixel. Cached by the settings that affect layout -- expensive to
-  /// compute, so it must never run during a scroll frame.
+  /// scroll pixel. Cached by the settings that affect layout. Measuring the
+  /// whole book with TextPainters is expensive, so large books are measured
+  /// time-sliced across frames (the table reads empty until it lands, and
+  /// callers fall back to fraction-based positioning); small books measure
+  /// synchronously so the first render lands on the exact block.
   List<double> _blockOffsets(List<TextBlock> blocks, double width) {
     // Measure with the same text scaler the rendered Text widgets use, or the
     // table silently underestimates every block (device font scaling > 1) and
@@ -658,6 +703,20 @@ class _ReaderScreenState extends State<ReaderScreen> {
     if (_blockOffsetsCache != null && _blockOffsetsCacheKey == key) {
       return _blockOffsetsCache!;
     }
+    if (_blockOffsetsBuilding) return const [];
+    if (blocks.length <= _syncOffsetsBlockLimit) {
+      final offsets = _measureOffsets(blocks, width, ts);
+      _blockOffsetsCache = offsets;
+      _blockOffsetsCacheKey = key;
+      return offsets;
+    }
+    _startBlockOffsetsBuild(blocks, width, key, ts);
+    return const [];
+  }
+
+  /// Synchronously measures the full-book offset table.
+  List<double> _measureOffsets(
+      List<TextBlock> blocks, double width, TextScaler ts) {
     final offsets = <double>[];
     var y = 0.0;
     for (final b in blocks) {
@@ -671,22 +730,81 @@ class _ReaderScreenState extends State<ReaderScreen> {
       y += tp.height + (b.isHeading ? 12 : 20);
       tp.dispose();
     }
-    _blockOffsetsCache = offsets;
-    _blockOffsetsCacheKey = key;
     return offsets;
+  }
+
+  /// Books larger than this measure their offset table off the critical path;
+  /// smaller ones build it synchronously (fast enough to avoid a visible
+  /// restore flash).
+  static const int _syncOffsetsBlockLimit = 400;
+
+  /// Time-slices the full-book offset measurement across frames so the UI
+  /// thread never blocks in one TextPainter burst.
+  void _startBlockOffsetsBuild(
+      List<TextBlock> blocks, double width, String key, TextScaler ts) {
+    _blockOffsetsBuilding = true;
+    _blockOffsetsCache = null;
+    _blockOffsetsCacheKey = null;
+    final offsets = <double>[];
+    var y = 0.0;
+    var i = 0;
+    _blockOffsetsTimer?.cancel();
+    _blockOffsetsTimer = Timer.periodic(const Duration(milliseconds: 16), (timer) {
+      final deadline = DateTime.now().add(const Duration(milliseconds: 8));
+      while (i < blocks.length && DateTime.now().isBefore(deadline)) {
+        final b = blocks[i];
+        offsets.add(y);
+        final style = b.isHeading ? _headingStyle : _bodyStyle;
+        final tp = TextPainter(
+          text: TextSpan(text: b.text, style: style),
+          textDirection: TextDirection.ltr,
+          textScaler: ts,
+        )..layout(maxWidth: width);
+        y += tp.height + (b.isHeading ? 12 : 20);
+        tp.dispose();
+        i++;
+      }
+      if (i >= blocks.length) {
+        timer.cancel();
+        _blockOffsetsTimer = null;
+        _blockOffsetsBuilding = false;
+        if (!mounted) return;
+        setState(() {
+          _blockOffsetsCache = offsets;
+          _blockOffsetsCacheKey = key;
+        });
+        _applyPendingScrollRestore();
+      }
+    });
+  }
+
+  /// Pre-warm the offset table so the first scroll restore / jump after a load
+  /// or settings change doesn't have to wait for it.
+  void _warmBlockOffsets() {
+    final blocks = _structured?.allBlocks;
+    if (blocks == null || blocks.isEmpty) return;
+    if (_settings.mode != ReaderMode.scroll) return;
+    _blockOffsets(blocks, _scrollContentWidth());
   }
 
   double _scrollContentWidth() =>
       MediaQuery.sizeOf(context).width - 2 * _readingInset;
 
-  double? _scrollOffsetForBlock(int? blockIndex) {
+  double? _scrollOffsetForBlock(double? blockIndex) {
     final blocks = _structured?.allBlocks;
-    if (blockIndex == null || blocks == null || blockIndex >= blocks.length) {
-      return null;
-    }
+    if (blockIndex == null || blocks == null) return null;
+    if (blockIndex >= blocks.length) return null;
     final offsets = _blockOffsets(blocks, _scrollContentWidth());
+    if (offsets.isEmpty) return null; // offset table still building
     final topPad = MediaQuery.sizeOf(context).height * 0.1;
-    return topPad + offsets[blockIndex];
+    final base = blockIndex.floor();
+    if (base >= offsets.length) return topPad + offsets.last;
+    final frac = blockIndex - base;
+    if (frac <= 0.001) return topPad + offsets[base];
+    // Interpolate between neighbouring block tops so a fractional anchor (a
+    // chunk of a split paragraph) lands inside the paragraph, not at its top.
+    final next = base + 1 < offsets.length ? offsets[base + 1] : offsets[base];
+    return topPad + offsets[base] + (next - offsets[base]) * frac;
   }
 
   /// The global block index currently at the top of the scroll viewport.
@@ -695,6 +813,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final blocks = _structured?.allBlocks;
     if (blocks == null || blocks.isEmpty) return null;
     final offsets = _blockOffsets(blocks, _scrollContentWidth());
+    if (offsets.isEmpty) return null; // offset table still building
     final topPad = MediaQuery.sizeOf(context).height * 0.1;
     final pixels = _scrollController.position.pixels - topPad + 2;
     // Binary search for the last block whose top offset is above the viewport
@@ -715,8 +834,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   /// Reads which block the *current* mode is showing, so we can re-anchor the
-  /// other mode to the same content on switch.
-  int? _captureAnchorBlock() {
+  /// other mode to the same content on switch. Fractional for chunk pages.
+  double? _captureAnchorBlock() {
     if (_settings.mode == ReaderMode.paginated) {
       final pages = _pages;
       if (pages == null || pages.isEmpty) return null;
@@ -724,13 +843,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
       return pages[pageIndex].first.$2;
     }
     if (_settings.mode == ReaderMode.scroll) {
-      return _topVisibleBlockInScroll();
+      return _topVisibleBlockInScroll()?.toDouble();
     }
     return null;
   }
 
   /// The page whose block range contains [blockIndex], else -1.
-  int _pageForBlock(int blockIndex, List<List<(TextBlock, int)>> pages) {
+  int _pageForBlock(double blockIndex, List<List<(TextBlock, double)>> pages) {
     for (var pi = 0; pi < pages.length; pi++) {
       final p = pages[pi];
       if (blockIndex >= p.first.$2 && blockIndex <= p.last.$2) return pi;
@@ -756,7 +875,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       // (block unknown) derive the block from the saved progress fraction so
       // the reader resumes where the user left off.
       final startBlock =
-          _currentBlock ?? (_fractionToBlock(_progress) ?? 0);
+          _currentBlock ?? (_fractionToBlock(_progress) ?? 0.0);
       initial = _pageForBlock(startBlock, pages);
       if (initial < 0) {
         initial = pages.length > 1
@@ -846,8 +965,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
     // never clip the last line if rendered metrics drift from the measured
     // ones (async font loads etc.).
     final height = g.textH - 16;
-    final pages = <List<(TextBlock, int)>>[];
-    var current = <(TextBlock, int)>[];
+    final pages = <List<(TextBlock, double)>>[];
+    var current = <(TextBlock, double)>[];
     var used = 0.0;
     var i = 0;
 
@@ -868,21 +987,29 @@ class _ReaderScreenState extends State<ReaderScreen> {
         if (blockHeight > height) {
           if (current.isNotEmpty) {
             pages.add(current);
-            current = <(TextBlock, int)>[];
+            current = <(TextBlock, double)>[];
             used = 0;
           }
           final chunks = _splitParagraph(b, width, height);
-          for (final chunk in chunks) {
-            pages
-                .add([(TextBlock(kind: b.kind, text: chunk, level: b.level), i)]);
+          // Give each chunk a distinct fractional anchor (i, i+1/n, ...) so a
+          // page holding a piece of a long paragraph is addressable for
+          // progress, seek, and mode-switch anchoring -- sharing block i would
+          // make every chunk page report the same position and drift the
+          // reader to the start of the paragraph on switch.
+          final n = chunks.length;
+          for (var k = 0; k < n; k++) {
+            pages.add([
+              (TextBlock(kind: b.kind, text: chunks[k], level: b.level),
+                  i + k / n)
+            ]);
           }
         } else {
           if (current.isNotEmpty && used + blockHeight > height) {
             pages.add(current);
-            current = <(TextBlock, int)>[];
+            current = <(TextBlock, double)>[];
             used = 0;
           }
-          current.add((b, i));
+          current.add((b, i.toDouble()));
           used += blockHeight;
         }
         i++;
@@ -958,11 +1085,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
   void _syncBlockFromScroll() {
     final idx = _topVisibleBlockInScroll();
     if (idx == null) return;
-    _currentBlock = idx;
-    _updateProgress(_progressFromBlock(idx));
+    _currentBlock = idx.toDouble();
+    _updateProgress(_progressFromBlock(idx.toDouble()));
   }
 
-  double _progressFromBlock(int block) {
+  double _progressFromBlock(double block) {
     final total = _structured?.allBlocks.length ?? 0;
     if (total <= 1) return 1.0;
     return (block / (total - 1)).clamp(0.0, 1.0);
@@ -970,11 +1097,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   void _onPageChanged(int index, int total) {
     if (total <= 1) {
-      _currentBlock = 0;
+      _currentBlock = 0.0;
       _updateProgress(1.0);
       return;
     }
-    // The block anchor for this page: the first block of the page we are on.
+    // The block anchor for this page: the first block of the page we are on
+    // (fractional for a chunk of a split paragraph).
     final pages = _pages;
     final pageBlock = (pages != null && pages.isNotEmpty)
         ? pages[index.clamp(0, pages.length - 1)].first.$2
@@ -1029,7 +1157,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
   Widget _buildHighlightMenu() {
     final menu = _highlightMenu!;
     final width = MediaQuery.sizeOf(context).width;
-    final left = (menu.position.dx - 130).clamp(16.0, width - 300.0);
+    // clamp() asserts if the lower bound exceeds the upper; on narrow screens
+    // the menu (300px wide) can't fit with a 16px margin, so widen the ceiling.
+    final maxLeft = math.max(16.0, width - 300.0);
+    final left = (menu.position.dx - 130).clamp(16.0, maxLeft);
     return Positioned(
       left: left,
       top: (menu.position.dy - 64).clamp(24.0, double.infinity),
@@ -1247,8 +1378,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
         // the thumb and the page agree on the same passage.
         final blocks = _structured!.allBlocks;
         final targetBlock = blocks.isEmpty
-            ? 0
-            : ((fraction * (blocks.length - 1)).round()).clamp(0, blocks.length - 1);
+            ? 0.0
+            : (fraction * (blocks.length - 1))
+                .clamp(0.0, (blocks.length - 1).toDouble());
         final page = _pageForBlock(targetBlock, pages);
         final target = page >= 0 ? page : (fraction * (pages.length - 1)).round().clamp(0, pages.length - 1);
         _bookController.goToPage(target);
@@ -1273,10 +1405,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
     });
   }
 
-  int? _fractionToBlock(double fraction) {
+  double? _fractionToBlock(double fraction) {
     final blocks = _structured?.allBlocks;
     if (blocks == null || blocks.isEmpty) return null;
-    return ((fraction * (blocks.length - 1)).round()).clamp(0, blocks.length - 1);
+    // Unrounded so a seek inside a split paragraph can resolve to the exact
+    // chunk page instead of snapping to the whole paragraph's first block.
+    return (fraction * (blocks.length - 1))
+        .clamp(0.0, (blocks.length - 1).toDouble());
   }
 
   /// Opens the "Appearance" sheet (bottom sheet, max 90% height) matching the
@@ -1309,7 +1444,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final paginated = _settings.mode == ReaderMode.paginated;
     final current = (_currentPage > 0
             ? _currentPage
-            : (_currentBlock ?? 0) + 1)
+            : (_currentBlock?.round() ?? 0) + 1)
         .clamp(1, math.max(1, _totalUnits));
     final ctl = TextEditingController(text: '$current');
     final input = await showDialog<String>(
@@ -1368,14 +1503,16 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   /// Translate a 0-based user page number to a block index proportional to the
-  /// current position across the whole text.
-  int? _pageToBlock(int page) {
+  /// current position across the whole text (fractional so seeks inside a
+  /// split paragraph land on the right chunk).
+  double? _pageToBlock(int page) {
     final blocks = _structured?.allBlocks;
     if (blocks == null || blocks.isEmpty) return null;
     final n = _totalUnits;
-    if (n <= 1) return 0;
+    if (n <= 1) return 0.0;
     final fraction = page / math.max(1, n - 1);
-    return ((fraction * (blocks.length - 1)).round()).clamp(0, blocks.length - 1);
+    return (fraction * (blocks.length - 1))
+        .clamp(0.0, (blocks.length - 1).toDouble());
   }
 
   Future<void> _openSearch() async {
@@ -1465,13 +1602,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
     if (chosen == null) return;
 
     if (_settings.mode == ReaderMode.scroll) {
-      _jumpToBlock(chosen.$1);
+      _jumpToBlock(chosen.$1.toDouble());
     } else {
       _jumpToPageContaining(chosen.$1);
     }
   }
 
-  void _jumpToBlock(int index) {
+  void _jumpToBlock(double index) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scrollController.hasClients) return;
       final offset = _scrollOffsetForBlock(index) ?? 0;
@@ -1487,7 +1624,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final pages = _pages;
     if (pages == null) return;
     for (var i = 0; i < pages.length; i++) {
-      if (pages[i].any((e) => e.$2 == index)) {
+      // floor() so any chunk page of a split paragraph counts as "containing"
+      // the block (the exact chunk page is close enough for search results).
+      if (pages[i].any((e) => e.$2.floor() == index)) {
         _bookController.goToPage(i);
         _onPageChanged(i, pages.length);
         return;
@@ -1738,7 +1877,7 @@ class _BookController {
 /// turn; a quick tap still toggles the chrome (handled by the outer pointer
 /// listener).
 class _SinglePageView extends StatefulWidget {
-  final List<List<(TextBlock, int)>> pages;
+  final List<List<(TextBlock, double)>> pages;
   final ReaderSettings settings;
   final _BookController controller;
   final int initialPage;
@@ -2202,7 +2341,7 @@ class _CornerFoldPainter extends CustomPainter {
 /// A single paper page: padded text column plus a page number at the bottom
 /// right corner, like a real printed page.
 class _BookLeaf extends StatelessWidget {
-  final List<(TextBlock, int)> blocks;
+  final List<(TextBlock, double)> blocks;
   final ReaderSettings settings;
   final Color paper;
   final int pageNumber;

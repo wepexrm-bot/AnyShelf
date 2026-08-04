@@ -6,7 +6,6 @@ import 'package:flutter/material.dart';
 
 import '../models/book.dart';
 import '../models/shelf.dart';
-import '../services/books_service.dart';
 import '../services/library_refresh.dart';
 import '../services/shelves_service.dart';
 import '../theme/serene_theme.dart';
@@ -28,44 +27,46 @@ class ShelvesScreen extends StatefulWidget {
 
 class _ShelvesScreenState extends State<ShelvesScreen> {
   final _shelvesService = ShelvesService();
-  final _booksService = BooksService();
   List<Shelf> _shelves = [];
   List<Book> _books = [];
   bool _loading = true;
-  int _loadEpoch = 0;
+  Object? _error;
 
   @override
   void initState() {
     super.initState();
-    _load();
-    LibraryRefresh.instance.addListener(_load);
+    _syncFromStore();
+    LibraryRefresh.instance.addListener(_onLibraryChanged);
+    _ensureLoaded();
   }
 
   @override
   void dispose() {
-    LibraryRefresh.instance.removeListener(_load);
+    LibraryRefresh.instance.removeListener(_onLibraryChanged);
     super.dispose();
   }
 
-  Future<void> _load() async {
-    final epoch = ++_loadEpoch;
-    setState(() => _loading = true);
-    try {
-      final results = await Future.wait<dynamic>([
-        _shelvesService.list(),
-        _booksService.list(),
-      ]);
-      if (!mounted || epoch != _loadEpoch) return;
-      setState(() {
-        _shelves = results[0] as List<Shelf>;
-        _books = results[1] as List<Book>;
-        _loading = false;
-      });
-    } catch (_) {
-      if (!mounted || epoch != _loadEpoch) return;
-      setState(() => _loading = false);
-    }
+  /// Copies the shared library snapshot (books + shelves) into this screen's
+  /// local state. Safe to call during initState.
+  void _syncFromStore() {
+    final store = LibraryRefresh.instance;
+    _books = store.books();
+    _shelves = store.shelves ?? const [];
+    _error = store.error;
+    _loading = !store.hasLoaded && store.isLoading;
   }
+
+  void _onLibraryChanged() {
+    if (!mounted) return;
+    setState(_syncFromStore);
+  }
+
+  void _ensureLoaded() {
+    final store = LibraryRefresh.instance;
+    if (!store.hasLoaded) store.reload();
+  }
+
+  Future<void> _refresh() => LibraryRefresh.instance.reload();
 
   Future<void> _openDetail(Shelf shelf) async {
     final changed = await Navigator.of(context).push<bool>(
@@ -87,7 +88,7 @@ class _ShelvesScreenState extends State<ShelvesScreen> {
       builder: (context) => _ShelfFormDialog(
         service: _shelvesService,
         books: _books,
-        onSaved: _load,
+        onSaved: _refresh,
       ),
     );
   }
@@ -123,8 +124,35 @@ class _ShelvesScreenState extends State<ShelvesScreen> {
     if (_loading) {
       return const Center(child: CircularProgressIndicator());
     }
+    if (_error != null && _books.isEmpty && _shelves.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.cloud_off, size: 40, color: Colors.black38),
+              const SizedBox(height: 12),
+              Text(
+                'Couldn\'t reach your library',
+                style: SereneType.title.copyWith(color: colors.onSurface),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '$_error',
+                textAlign: TextAlign.center,
+                style: SereneType.uiBody
+                    .copyWith(color: colors.onSurfaceVariant),
+              ),
+              const SizedBox(height: 16),
+              FilledButton(onPressed: _refresh, child: const Text('Retry')),
+            ],
+          ),
+        ),
+      );
+    }
     return RefreshIndicator(
-      onRefresh: _load,
+      onRefresh: _refresh,
       child: CustomScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
         slivers: [
@@ -1300,6 +1328,7 @@ class _ShelfDetailScreenState extends State<_ShelfDetailScreen> {
     for (final b in widget.books) b.id: b,
   };
   bool _loading = true;
+  String? _error;
 
   @override
   void initState() {
@@ -1310,7 +1339,10 @@ class _ShelfDetailScreenState extends State<_ShelfDetailScreen> {
   /// Fetches the full shelf — the list endpoint omits the books array, so the
   /// detail view must load it before showing anything.
   Future<void> _load() async {
-    setState(() => _loading = true);
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
     try {
       final fresh = await widget.service.get(widget.shelf.id);
       if (!mounted) return;
@@ -1319,9 +1351,12 @@ class _ShelfDetailScreenState extends State<_ShelfDetailScreen> {
         _shelfBooks = fresh.books;
         _loading = false;
       });
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
-      setState(() => _loading = false);
+      setState(() {
+        _loading = false;
+        _error = '$e';
+      });
     }
   }
 
@@ -1332,8 +1367,12 @@ class _ShelfDetailScreenState extends State<_ShelfDetailScreen> {
       setState(() {
         _shelf = fresh;
         _shelfBooks = fresh.books;
+        _error = null;
       });
-    } catch (_) {}
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = '$e');
+    }
   }
 
   Future<void> _edit() async {
@@ -1467,6 +1506,32 @@ class _ShelfDetailScreenState extends State<_ShelfDetailScreen> {
                   padding: const EdgeInsets.fromLTRB(24, 8, 24, 32),
                   children: [
                     ShelfCover(shelf: _shelf, height: 170),
+                    if (_error != null) ...[
+                      const SizedBox(height: 12),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: colors.errorContainer,
+                          borderRadius: const BorderRadius.all(SereneShape.md),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                'Couldn\'t refresh this shelf.',
+                                style: SereneType.labelMd.copyWith(
+                                    color: colors.onErrorContainer),
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: _load,
+                              child: const Text('Retry'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                     if (_shelf.description != null &&
                         _shelf.description!.isNotEmpty) ...[
                       const SizedBox(height: 16),

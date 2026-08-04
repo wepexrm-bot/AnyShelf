@@ -30,7 +30,6 @@ class _BooksScreenState extends State<BooksScreen> {
   List<Shelf> _shelves = [];
   bool _loading = true;
   String? _error;
-  int _loadEpoch = 0;
 
   String _genre = '';
   _BooksSort _sort = _BooksSort.newest;
@@ -38,51 +37,38 @@ class _BooksScreenState extends State<BooksScreen> {
   @override
   void initState() {
     super.initState();
-    _load();
-    LibraryRefresh.instance.addListener(_load);
+    _syncFromStore();
+    LibraryRefresh.instance.addListener(_onLibraryChanged);
+    _ensureLoaded();
   }
 
   @override
   void dispose() {
-    LibraryRefresh.instance.removeListener(_load);
+    LibraryRefresh.instance.removeListener(_onLibraryChanged);
     super.dispose();
   }
 
-  Future<void> _load() async {
-    final epoch = ++_loadEpoch;
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final results = await Future.wait<dynamic>([
-        _booksService.list(),
-        _shelvesService.list(),
-      ]);
-      final books = results[0] as List<Book>;
-      _shelves = results[1] as List<Shelf>;
-      final progress = <String, double>{};
-      await Future.wait(books.map((b) async {
-        try {
-          progress[b.id] = await _booksService.progress(b.id);
-        } catch (_) {}
-      }));
-      if (!mounted || epoch != _loadEpoch) return;
-      setState(() {
-        _books = [
-          for (final b in books)
-            b.copyWith(progress: progress[b.id] ?? b.progress),
-        ];
-        _loading = false;
-      });
-    } catch (e) {
-      if (!mounted || epoch != _loadEpoch) return;
-      setState(() {
-        _error = '$e';
-        _loading = false;
-      });
-    }
+  /// Copies the shared library snapshot (books + progress + shelves) into this
+  /// screen's local state. Safe to call during initState.
+  void _syncFromStore() {
+    final store = LibraryRefresh.instance;
+    _books = store.books();
+    _shelves = store.shelves ?? const [];
+    _error = store.error?.toString();
+    _loading = !store.hasLoaded && store.isLoading;
   }
+
+  void _onLibraryChanged() {
+    if (!mounted) return;
+    setState(_syncFromStore);
+  }
+
+  void _ensureLoaded() {
+    final store = LibraryRefresh.instance;
+    if (!store.hasLoaded) store.reload();
+  }
+
+  Future<void> _refresh() => LibraryRefresh.instance.reload();
 
   List<Book> get _filtered {
     final filtered = _books.where((b) {
@@ -220,7 +206,7 @@ class _BooksScreenState extends State<BooksScreen> {
               const SizedBox(height: 12),
               const Text('Couldn\'t reach your library'),
               const SizedBox(height: 12),
-              FilledButton(onPressed: _load, child: const Text('Retry')),
+              FilledButton(onPressed: _refresh, child: const Text('Retry')),
             ],
           ),
         ),
@@ -234,7 +220,7 @@ class _BooksScreenState extends State<BooksScreen> {
     final tileHeight = tileWidth * 3 / 2 + 92;
 
     return RefreshIndicator(
-      onRefresh: _load,
+      onRefresh: _refresh,
       child: CustomScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
         slivers: [

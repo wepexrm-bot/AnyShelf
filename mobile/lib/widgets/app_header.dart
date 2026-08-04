@@ -7,9 +7,11 @@ import 'package:provider/provider.dart';
 import '../models/book.dart';
 import '../screens/reader_screen.dart';
 import '../services/books_service.dart';
+import '../services/library_refresh.dart';
 import '../services/ui_mode_controller.dart';
 import '../theme/serene_theme.dart';
 import '../theme/serene_tokens.dart';
+import 'stable_network_image.dart';
 import 'sync_indicator.dart';
 
 /// Branded top bar: filled cloud glyph + "AnyShelf" wordmark (Playfair, accent
@@ -118,6 +120,13 @@ class _HeaderSearchState extends State<_HeaderSearch> {
   double? _panelMaxHeight;
   double? _panelLeft;
   OverlayEntry? _entry;
+  // The whole-library snapshot, fetched once and filtered locally so typing
+  // doesn't hit the network per keystroke. Invalidated whenever the library
+  // changes (upload/delete/shelf edits).
+  List<Book>? _catalog;
+  // Bumped per search so a slow in-flight response can never clobber the
+  // results of a newer query.
+  int _searchEpoch = 0;
   static const double _maxPanelCap = 320;
   static const double _bottomMargin = 24;
   static const double _minPanelHeight = 120;
@@ -126,7 +135,14 @@ class _HeaderSearchState extends State<_HeaderSearch> {
       _focus.hasFocus && _ctl.text.trim().isNotEmpty;
 
   @override
+  void initState() {
+    super.initState();
+    LibraryRefresh.instance.addListener(_onLibraryChanged);
+  }
+
+  @override
   void dispose() {
+    LibraryRefresh.instance.removeListener(_onLibraryChanged);
     _debounce?.cancel();
     _focus.removeListener(_onFocusChanged);
     _focus.dispose();
@@ -134,6 +150,8 @@ class _HeaderSearchState extends State<_HeaderSearch> {
     _removeOverlay();
     super.dispose();
   }
+
+  void _onLibraryChanged() => _catalog = null;
 
   void _onFocusChanged() {
     setState(() {});
@@ -221,23 +239,26 @@ class _HeaderSearchState extends State<_HeaderSearch> {
   }
 
   Future<void> _search(String query) async {
+    final epoch = ++_searchEpoch;
     try {
-      final books = await BooksService().list();
+      final catalog = _catalog ??= await BooksService().list();
+      // A newer search started while this one was in flight; drop the stale
+      // response so the panel never shows results for the previous query.
+      if (!mounted || epoch != _searchEpoch) return;
       final q = query.toLowerCase();
-      final matches = books
+      final matches = catalog
           .where((b) =>
               b.title.toLowerCase().contains(q) ||
               (b.author ?? '').toLowerCase().contains(q))
           .take(8)
           .toList();
-      if (!mounted) return;
       setState(() {
         _results = matches;
         _loading = false;
       });
       _updateOverlay();
     } catch (_) {
-      if (!mounted) return;
+      if (!mounted || epoch != _searchEpoch) return;
       setState(() {
         _results = const [];
         _loading = false;
@@ -340,8 +361,11 @@ class _HeaderSearchState extends State<_HeaderSearch> {
     final url = b.coverUrl;
     Widget inner;
     if (url != null && url.isNotEmpty) {
-      inner = Image.network(
-        url,
+      inner = Image(
+        image: ResizeImage(
+          StableNetworkImage(url),
+          width: (34 * MediaQuery.devicePixelRatioOf(context)).round(),
+        ),
         fit: BoxFit.cover,
         errorBuilder: (_, __, ___) => _placeholder(colors),
       );

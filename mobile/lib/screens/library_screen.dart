@@ -4,7 +4,6 @@ import '../models/book.dart';
 import '../models/shelf.dart';
 import '../services/books_service.dart';
 import '../services/library_refresh.dart';
-import '../services/shelves_service.dart';
 import '../theme/serene_theme.dart';
 import '../theme/serene_tokens.dart';
 import '../widgets/app_header.dart';
@@ -29,53 +28,48 @@ class LibraryScreen extends StatefulWidget {
 
 class _LibraryScreenState extends State<LibraryScreen> {
   final _booksService = BooksService();
-  final _shelvesService = ShelvesService();
   List<Book> _books = [];
   List<Shelf> _shelves = [];
   bool _loading = true;
-  int _loadEpoch = 0;
+  Object? _error;
 
   static const double _completedFraction = 0.995;
 
   @override
   void initState() {
     super.initState();
-    _load();
-    LibraryRefresh.instance.addListener(_load);
+    _syncFromStore();
+    LibraryRefresh.instance.addListener(_onLibraryChanged);
+    _ensureLoaded();
   }
 
   @override
   void dispose() {
-    LibraryRefresh.instance.removeListener(_load);
+    LibraryRefresh.instance.removeListener(_onLibraryChanged);
     super.dispose();
   }
 
-  Future<void> _load() async {
-    final epoch = ++_loadEpoch;
-    setState(() => _loading = true);
-    try {
-      final books = await _booksService.list();
-      final progress = <String, double>{};
-      await Future.wait(books.map((b) async {
-        try {
-          progress[b.id] = await _booksService.progress(b.id);
-        } catch (_) {}
-      }));
-      final shelves = await _shelvesService.list();
-      if (!mounted || epoch != _loadEpoch) return;
-      setState(() {
-        _books = [
-          for (final b in books)
-            b.copyWith(progress: progress[b.id] ?? b.progress),
-        ];
-        _shelves = shelves;
-        _loading = false;
-      });
-    } catch (_) {
-      if (!mounted || epoch != _loadEpoch) return;
-      setState(() => _loading = false);
-    }
+  /// Copies the shared library snapshot (books + progress + shelves) into this
+  /// screen's local state. Safe to call during initState.
+  void _syncFromStore() {
+    final store = LibraryRefresh.instance;
+    _books = store.books();
+    _shelves = store.shelves ?? const [];
+    _error = store.error;
+    _loading = !store.hasLoaded && store.isLoading;
   }
+
+  void _onLibraryChanged() {
+    if (!mounted) return;
+    setState(_syncFromStore);
+  }
+
+  void _ensureLoaded() {
+    final store = LibraryRefresh.instance;
+    if (!store.hasLoaded) store.reload();
+  }
+
+  Future<void> _refresh() => LibraryRefresh.instance.reload();
 
   bool _isCompleted(Book b) => (b.progress ?? 0) >= _completedFraction;
 
@@ -159,12 +153,39 @@ class _LibraryScreenState extends State<LibraryScreen> {
     if (_loading) {
       return const Center(child: CircularProgressIndicator());
     }
+    if (_error != null && _books.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.cloud_off, size: 40, color: Colors.black38),
+              const SizedBox(height: 12),
+              Text(
+                'Couldn\'t reach your library',
+                style: SereneType.title.copyWith(color: colors.onSurface),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '$_error',
+                textAlign: TextAlign.center,
+                style: SereneType.uiBody
+                    .copyWith(color: colors.onSurfaceVariant),
+              ),
+              const SizedBox(height: 16),
+              FilledButton(onPressed: _refresh, child: const Text('Retry')),
+            ],
+          ),
+        ),
+      );
+    }
 
     final continuing = _continueReading;
     final recent = _recentlyAdded;
 
     return RefreshIndicator(
-      onRefresh: _load,
+      onRefresh: _refresh,
       child: CustomScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
         slivers: [

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/book.dart';
 import '../theme/serene_tokens.dart';
+import 'stable_network_image.dart';
 
 /// 2:3 book cover. If a real cover image is present it is shown full-bleed;
 /// otherwise a calm placeholder (icon + "PDF Document") keeps the shelf
@@ -28,38 +29,52 @@ class BookCover extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final cover = ClipRRect(
       borderRadius: BorderRadius.circular(borderRadius),
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          if (book.coverUrl != null && book.coverUrl!.isNotEmpty)
-            Image.network(
-              book.coverUrl!,
-              fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) => _placeholder(scheme),
-            )
-          else
-            _placeholder(scheme),
-          const DecoratedBox(
-            decoration: BoxDecoration(
-              border: Border.fromBorderSide(
-                BorderSide(color: Color(0x14FFFFFF)),
-              ),
-            ),
-          ),
-          if (showProgress && progress != null && progress! > 0)
-            Align(
-              alignment: Alignment.bottomCenter,
-              child: Container(
-                height: 6,
-                color: scheme.outlineVariant.withValues(alpha: 0.5),
-                child: FractionallySizedBox(
-                  alignment: Alignment.centerLeft,
-                  widthFactor: progress!.clamp(0.0, 1.0),
-                  child: Container(color: const Color(0xFF134E4A)),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // Decode covers at display resolution instead of their full
+          // upload size, so a 300x450px shelf card doesn't hold a multi-MB
+          // bitmap in memory.
+          final rawW =
+              constraints.maxWidth * MediaQuery.devicePixelRatioOf(context);
+          final cacheWidth =
+              rawW.isFinite && rawW > 0 ? rawW.round() : null;
+          final provider = StableNetworkImage(book.coverUrl!);
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              if (book.coverUrl != null && book.coverUrl!.isNotEmpty)
+                Image(
+                  image: cacheWidth != null
+                      ? ResizeImage(provider, width: cacheWidth)
+                      : provider,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => _placeholder(scheme),
+                )
+              else
+                _placeholder(scheme),
+              const DecoratedBox(
+                decoration: BoxDecoration(
+                  border: Border.fromBorderSide(
+                    BorderSide(color: Color(0x14FFFFFF)),
+                  ),
                 ),
               ),
-            ),
-        ],
+              if (showProgress && progress != null && progress! > 0)
+                Align(
+                  alignment: Alignment.bottomCenter,
+                  child: Container(
+                    height: 6,
+                    color: scheme.outlineVariant.withValues(alpha: 0.5),
+                    child: FractionallySizedBox(
+                      alignment: Alignment.centerLeft,
+                      widthFactor: progress!.clamp(0.0, 1.0),
+                      child: Container(color: const Color(0xFF134E4A)),
+                    ),
+                  ),
+                ),
+            ],
+          );
+        },
       ),
     );
 
