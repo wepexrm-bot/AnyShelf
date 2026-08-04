@@ -34,10 +34,7 @@ class Settings(BaseSettings):
     # Frontend base URL used to build password-reset links.
     frontend_base: str = "https://anyshelf.onrender.com"
 
-    # Resend HTTP API (preferred over SMTP on cloud hosts that block port 587).
-    resend_api_key: str | None = None
-
-    # Brevo (Sendinblue) HTTP API - alternative to Resend. Works over 443.
+    # Brevo (Sendinblue) HTTP API - works over 443.
     brevo_api_key: str | None = None
 
     # OCR
@@ -49,7 +46,6 @@ class Settings(BaseSettings):
         "smtp_host",
         "smtp_user",
         "smtp_password",
-        "resend_api_key",
         "brevo_api_key",
         mode="before",
     )

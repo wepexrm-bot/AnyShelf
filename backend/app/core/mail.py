@@ -1,8 +1,8 @@
 """Email delivery for verification / password-reset links.
 
-In development (no SMTP/Resend configured) links are logged and returned by
-the auth routes so the flow works end to end. When `settings.resend_api_key`
-is set, email is sent via the Resend HTTP API (reliable on cloud hosts that
+In development (no SMTP/Brevo configured) links are logged and returned by
+the auth routes so the flow works end to end. When `settings.brevo_api_key`
+is set, email is sent via the Brevo HTTP API (reliable on cloud hosts that
 block outbound SMTP). Otherwise plain SMTP is used as a fallback.
 """
 
@@ -21,52 +21,9 @@ logger = logging.getLogger("Anyshelf.mail")
 
 def send_email(to: str, subject: str, html: str) -> bool:
     """Send an HTML email. Returns True if sent (or queued in dev)."""
-    if settings.resend_api_key:
-        return _send_via_resend_api(to, subject, html)
     if settings.brevo_api_key:
         return _send_via_brevo_api(to, subject, html)
     return _send_via_smtp(to, subject, html)
-
-
-def _send_via_resend_api(to: str, subject: str, html: str) -> bool:
-    payload = {
-        "from": settings.smtp_from,
-        "to": [to],
-        "subject": subject,
-        "html": html,
-    }
-    req = urllib.request.Request(
-        "https://api.resend.com/emails",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {settings.resend_api_key}",
-            "Content-Type": "application/json",
-            "User-Agent": "anyshelf-backend/1.0",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            if resp.status != 200:
-                logger.error(
-                    "Resend API returned %s for %s: %s",
-                    resp.status,
-                    to,
-                    resp.read().decode("utf-8", "replace"),
-                )
-                return False
-            return True
-    except urllib.error.HTTPError as exc:
-        logger.error(
-            "Resend API HTTP %s for %s: %s",
-            exc.code,
-            to,
-            exc.read().decode("utf-8", "replace"),
-        )
-        return False
-    except Exception as exc:
-        logger.error("Failed to send email via Resend API to %s: %s", to, exc)
-        return False
 
 
 def _send_via_brevo_api(to: str, subject: str, html: str) -> bool:
