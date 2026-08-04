@@ -25,7 +25,7 @@ class ApiClient {
   final String baseUrl;
   ApiClient({String? baseUrl}) : baseUrl = baseUrl ?? defaultBase;
 
-  static const Duration _timeout = Duration(seconds: 30);
+  static const Duration _timeout = Duration(seconds: 90);
 
   static String _friendlyError(Object error) {
     if (error is TimeoutException) {

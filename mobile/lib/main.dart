@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import 'screens/auth_screen.dart';
+import 'services/api_client.dart';
 import 'services/auth_service.dart';
 import 'services/ui_mode_controller.dart';
 import 'theme/serene_theme.dart';
@@ -10,7 +11,18 @@ import 'widgets/app_shell.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  // Wake the backend on launch (Render free tier sleeps after idle), so the
+  // first real request doesn't wait out a slow cold start.
+  _warmApi();
   runApp(const CloudReadApp());
+}
+
+Future<void> _warmApi() async {
+  try {
+    await ApiClient().get('/health');
+  } catch (_) {
+    // Best-effort warm-up; failures are expected on the first cold boot.
+  }
 }
 
 class CloudReadApp extends StatefulWidget {

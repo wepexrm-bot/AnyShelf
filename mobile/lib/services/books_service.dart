@@ -153,7 +153,7 @@ class BooksService {
     try {
       final res = await http
           .get(Uri.parse(url))
-          .timeout(const Duration(seconds: 30)); // pre-signed URL, no auth
+          .timeout(const Duration(seconds: 90)); // pre-signed URL, no auth
       if (res.statusCode != 200 || res.body.isEmpty) return null;
       // Decode off the UI isolate so large books don't jank the reader open.
       // Hand the encoded bytes to the isolate rather than the decoded string,
