@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.models import Book, Annotation, ReadingProgress, ReadingSession, Activity, shelf_books, User
 from app.core.storage import upload_file, get_presigned_url, upload_bytes, delete_file
 from app.core.extraction.pipeline import run_pipeline
+from app.core.cover_fetch import fetch_cover
 from app.api.routes.auth import get_current_user
 from app.db.database import get_db, SessionLocal
 
@@ -64,6 +65,7 @@ async def upload_book(
     db.commit()
     db.refresh(book)
 
+    manual_cover_saved = False
     if cover is not None:
         cover_contents = await cover.read()
         if cover_contents:
@@ -71,11 +73,18 @@ async def upload_book(
             upload_bytes(cover_contents, cover_key, content_type=cover.content_type or "image/jpeg")
             book.cover_key = cover_key
             db.commit()
+            manual_cover_saved = True
 
     # Extraction runs async so upload responds immediately -- large PDFs can
     # take a while to process, especially if OCR is needed. The background
     # task opens its own DB session, so the request session isn't passed.
     background_tasks.add_task(process_extraction, book.id, tmp_path)
+
+    # No manual cover was attached -- try to find the real published cover
+    # by title/author in the background. If nothing is found, cover_key
+    # simply stays unset; we never fabricate a placeholder here.
+    if not manual_cover_saved:
+        background_tasks.add_task(fetch_and_store_cover, book.id, title, author)
 
     return {
         "book_id": book.id,
@@ -170,6 +179,41 @@ def process_extraction(book_id: str, local_pdf_path: str):
             pass
 
 
+async def fetch_and_store_cover(book_id: str, title: str, author: str):
+    """Look up a real cover by title/author and store it, if one is found.
+
+    Runs independently of process_extraction -- a slow or failed cover
+    lookup should never hold up or fail the extraction pipeline, and vice
+    versa. Opens its own DB session for the same reason process_extraction
+    does: the request-scoped session is already closed by the time
+    background tasks run.
+    """
+    try:
+        result = await fetch_cover(title, author)
+    except Exception as exc:  # best-effort: never let a lookup bug surface to the user
+        logger.info("Cover lookup errored for book %s: %s", book_id, exc)
+        return
+
+    if not result:
+        return  # no match found -- leave cover_key unset, no placeholder
+
+    image_bytes, content_type = result
+    db = SessionLocal()
+    try:
+        book = db.query(Book).filter(Book.id == book_id).first()
+        if not book or book.cover_key:
+            # Book was deleted, or a manual/earlier cover already landed
+            # first -- don't clobber it.
+            return
+        ext = "png" if "png" in content_type else "jpg"
+        cover_key = f"covers/{book.owner_id}/{book.id}.{ext}"
+        upload_bytes(image_bytes, cover_key, content_type=content_type)
+        book.cover_key = cover_key
+        db.commit()
+    finally:
+        db.close()
+
+
 @router.get("/")
 def list_books(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     books = (
@@ -224,6 +268,7 @@ class BookUpdate(BaseModel):
 def update_book(
     book_id: str,
     body: BookUpdate,
+    background_tasks: BackgroundTasks,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -234,13 +279,27 @@ def update_book(
     if book.owner_id != user.id:
         raise HTTPException(status_code=403, detail="Not your book")
 
+    title_changed = False
+    author_changed = False
     if body.title is not None and body.title.strip():
-        book.title = body.title.strip()
+        new_title = body.title.strip()
+        title_changed = new_title != book.title
+        book.title = new_title
     if body.author is not None:
-        book.author = body.author.strip() or None
+        new_author = body.author.strip() or None
+        author_changed = new_author != book.author
+        book.author = new_author
     if body.genre is not None:
         book.genre = body.genre.strip() or None
     db.commit()
+
+    # The book still has no cover and its lookup-relevant metadata changed --
+    # kick off a background cover lookup with the corrected title/author.
+    # Same rules as upload: never clobber an existing cover, never fabricate
+    # a placeholder when there's no match.
+    if (title_changed or author_changed) and not book.cover_key:
+        background_tasks.add_task(fetch_and_store_cover, book.id, book.title, book.author or "")
+
     return {"id": book.id, "status": "updated"}
 
 
