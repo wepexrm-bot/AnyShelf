@@ -315,13 +315,19 @@ def update_book_cover(
     if not contents:
         raise HTTPException(status_code=400, detail="Empty file")
 
-    storage_key = f"covers/{user.id}/{book_id}.jpg"
-    upload_bytes(contents, storage_key, content_type=file.content_type or "image/jpeg")
+    # Match the key to the actual image type. The auto-fetch stores JPEGs at
+    # `covers/{user}/{book_id}.jpg`, so a PNG upload must use a different key
+    # than the cover it replaces -- and a JPEG replacement reuses the existing
+    # key (overwriting it in place) instead of deleting its own file.
+    content_type = file.content_type or "image/jpeg"
+    ext = "png" if content_type.lower().startswith("image/png") else "jpg"
+    storage_key = f"covers/{user.id}/{book_id}.{ext}"
+    upload_bytes(contents, storage_key, content_type=content_type)
 
     old_key = book.cover_key
     book.cover_key = storage_key
     db.commit()
-    if old_key:
+    if old_key and old_key != storage_key:
         try:
             delete_file(old_key)
         except Exception:
