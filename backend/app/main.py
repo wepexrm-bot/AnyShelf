@@ -27,6 +27,6 @@ app.include_router(stats.router, prefix="/stats", tags=["stats"])
 app.include_router(social.router, prefix="/social", tags=["social"])
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health_check():
     return {"status": "ok", "app": settings.app_name}
