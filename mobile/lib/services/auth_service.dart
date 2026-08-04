@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:shared_preferences/shared_preferences.dart';
+
 import 'api_client.dart';
 
 class AuthService {
@@ -11,6 +13,7 @@ class AuthService {
         body: {'email': email, 'password': password});
     final map = data as Map<String, dynamic>;
     await api.setToken(map['access_token'] as String?);
+    await _saveDisplayName(map['display_name'] as String?);
     return map;
   }
 
@@ -35,6 +38,23 @@ class AuthService {
 
   Future<void> logout() async {
     await api.setToken(null);
+    await _saveDisplayName(null);
+  }
+
+  /// The signed-in user's display name, cached locally at login so the header
+  /// avatar can render initials without a network round-trip.
+  Future<String?> getDisplayName() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('user_display_name');
+  }
+
+  Future<void> _saveDisplayName(String? name) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (name == null || name.trim().isEmpty) {
+      await prefs.remove('user_display_name');
+    } else {
+      await prefs.setString('user_display_name', name.trim());
+    }
   }
 
   /// A session only counts if a token is stored *and* it hasn't expired. The

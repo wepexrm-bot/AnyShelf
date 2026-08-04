@@ -12,22 +12,22 @@ import '../services/ui_mode_controller.dart';
 import '../theme/serene_theme.dart';
 import '../theme/serene_tokens.dart';
 import 'stable_network_image.dart';
-import 'sync_indicator.dart';
+import 'profile_avatar.dart';
 
 /// Branded top bar: filled cloud glyph + "AnyShelf" wordmark (Playfair, accent
 /// green) on the left, a library-wide search field in the middle, an optional
-/// light/dark toggle, and the trailing widget (by default the cloud sync
-/// status). Reads "top app bar" in the design. Sits under the notification
-/// panel, so the content is wrapped in a SafeArea.
+/// light/dark toggle, and the trailing widget (by default the signed-in user's
+/// initials avatar). Reads "top app bar" in the design. Sits under the
+/// notification panel, so the content is wrapped in a SafeArea.
 class AppHeader extends StatelessWidget {
   final Widget? trailing;
-  final bool showSync;
+  final bool showProfile;
   final bool showThemeToggle;
   final EdgeInsetsGeometry padding;
   const AppHeader({
     super.key,
     this.trailing,
-    this.showSync = true,
+    this.showProfile = true,
     this.showThemeToggle = true,
     this.padding = const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
   });
@@ -86,7 +86,7 @@ class AppHeader extends StatelessWidget {
                     ),
                     const SizedBox(width: 4),
                   ],
-                  trailing ?? (showSync ? const SyncIndicator() : const SizedBox()),
+                  trailing ?? (showProfile ? const ProfileAvatar() : const SizedBox()),
                 ],
               );
             },
