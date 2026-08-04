@@ -116,12 +116,18 @@ def render_button_link(text: str, url: str) -> str:
 
 def render_code_email(code: str, purpose: str = "sign up") -> str:
     """Email body that displays a 6-digit verification code prominently."""
+    greeting = (
+        "<p style='font-size:16px;font-weight:600;color:#1b1c1c'>Welcome to Anyshelf!</p>"
+        if "reset" not in purpose
+        else ""
+    )
     return (
         "<div style='font-family:sans-serif;margin:0;padding:24px;background:#fcf9f8'>"
         "<p style='font-family:Georgia,serif;font-size:18px;color:#1b1c1c'>Anyshelf</p>"
+        "%s"
         "<p style='color:#42493e'>Use this verification code to %s:</p>"
         "<div style='margin:16px 0;padding:16px;background:#f0eded;border-radius:8px;"
         "font-size:28px;font-weight:bold;letter-spacing:10px;color:#154212;text-align:center'>%s</div>"
         "<p style='color:#72796e;font-size:12px'>This code expires in 60 minutes.</p>"
         "</div>"
-    ) % (purpose, code)
+    ) % (greeting, purpose, code)
