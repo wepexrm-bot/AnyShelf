@@ -648,17 +648,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       _pendingScrollRestore = _progress;
       return;
     }
-    _restoringScroll = true;
-    _scrollController.jumpTo(target.clamp(0.0, max));
-    _anchorBlock = null;
-    // Re-derive the block from the new viewport so progress matches, including
-    // the top 10% padding that pixel math ignores. Persisting stays suppressed
-    // until the viewport has settled, so a mid-restore sync can't clobber the
-    // saved position.
-    _syncBlockFromScroll();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _restoringScroll = false;
-    });
+    _restoreScrollToTarget(target);
   }
 
   /// Completes a scroll restore that had to wait for the offset table to
@@ -673,8 +663,31 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final block = _fractionToBlock(pending);
     final target = block != null ? _scrollOffsetForBlock(block) : pending * max;
     if (target == null) return;
+    _restoreScrollToTarget(target);
+  }
+
+  /// Jump the scroll list to the exact pixel the reader was on. The lazy
+  /// ListView reports a growing (estimate-based) maxScrollExtent while items
+  /// are still being built, so a single jump clamps to a stale ceiling and
+  /// lands mid-book (e.g. a 72% restore lands at ~39%). Re-apply the jump each
+  /// frame until the extent has grown past the target (or a frame budget
+  /// expires), then settle: re-derive the block so saved progress matches the
+  /// viewport, and release the persist-suppression flag only once the viewport
+  /// has truly settled.
+  void _restoreScrollToTarget(double target, {int frameBudget = 120}) {
+    if (!mounted || !_scrollController.hasClients) return;
     _restoringScroll = true;
-    _scrollController.jumpTo(target.clamp(0.0, max));
+    final max = _scrollController.position.maxScrollExtent;
+    final clamped = target.clamp(0.0, max);
+    _scrollController.jumpTo(clamped);
+    if (clamped < target && frameBudget > 0) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_scrollController.hasClients) return;
+        _restoreScrollToTarget(target, frameBudget: frameBudget - 1);
+      });
+      return;
+    }
+    _anchorBlock = null;
     _syncBlockFromScroll();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _restoringScroll = false;

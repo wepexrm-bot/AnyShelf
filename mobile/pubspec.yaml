@@ -1,7 +1,7 @@
 name: cloudread
 description: CloudRead — cloud-native PDF reading app (Serene design)
 publish_to: "none"
-version: 4.0.5+6
+version: 4.0.6+7
 
 environment:
   sdk: ">=3.6.0 <4.0.0"
