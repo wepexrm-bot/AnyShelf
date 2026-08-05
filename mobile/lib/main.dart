@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'screens/auth_screen.dart';
 import 'services/api_client.dart';
 import 'services/auth_service.dart';
+import 'services/library_refresh.dart';
 import 'services/ui_mode_controller.dart';
 import 'services/update_service.dart';
 import 'theme/serene_theme.dart';
@@ -34,21 +35,37 @@ class CloudReadApp extends StatefulWidget {
   State<CloudReadApp> createState() => _CloudReadAppState();
 }
 
-class _CloudReadAppState extends State<CloudReadApp> {
+class _CloudReadAppState extends State<CloudReadApp> with WidgetsBindingObserver {
   final _uiMode = UiModeController();
   final _navKey = GlobalKey<NavigatorState>();
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _uiMode.load();
     _checkForUpdate();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _uiMode.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Return to the app -> quietly revalidate the library so reading done
+    // elsewhere (or a stale snapshot) is replaced without a manual refresh.
+    if (state == AppLifecycleState.resumed) {
+      _refreshLibrarySilently();
+    }
+  }
+
+  Future<void> _refreshLibrarySilently() async {
+    final has = await AuthService().hasSession();
+    if (has) LibraryRefresh.instance.reload();
   }
 
   /// Blocks the app when a newer build is published on GitHub so stale APKs
@@ -107,6 +124,14 @@ class _AuthGateState extends State<_AuthGate> {
 
   Future<void> _check() async {
     final has = await _auth.hasSession();
+    if (has) {
+      // Restore the cached library before the shell builds so the first frame
+      // shows books instead of an empty state; reload() revalidates after.
+      await LibraryRefresh.instance.hydrate();
+    } else {
+      // Ensure a previous session's cache can't leak into the auth screen.
+      LibraryRefresh.instance.clear();
+    }
     if (!mounted) return;
     setState(() {
       _hasSession = has;

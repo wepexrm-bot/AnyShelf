@@ -238,6 +238,29 @@ def list_books(user: User = Depends(get_current_user), db: Session = Depends(get
     ]
 
 
+@router.get("/progress")
+def list_progress(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Reading progress for every book the user owns, in one call.
+
+    The mobile app uses this instead of one request per book, so refreshing
+    the library is a constant number of requests rather than O(N).
+    Registered before ``/{book_id}`` so the static path isn't shadowed.
+    """
+    rows = (
+        db.query(ReadingProgress)
+        .filter(ReadingProgress.user_id == user.id)
+        .all()
+    )
+    return [
+        {
+            "book_id": r.book_id,
+            "current_page": r.current_page,
+            "current_offset": r.current_offset,
+        }
+        for r in rows
+    ]
+
+
 @router.get("/{book_id}/progress")
 def get_extraction_progress(
     book_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)

@@ -7,7 +7,6 @@ import '../models/book.dart';
 import '../models/shelf.dart';
 import '../services/books_service.dart';
 import '../services/library_refresh.dart';
-import '../services/shelves_service.dart';
 import '../theme/serene_theme.dart';
 import '../theme/serene_tokens.dart';
 import '../widgets/app_header.dart';
@@ -29,7 +28,6 @@ class BooksScreen extends StatefulWidget {
 
 class _BooksScreenState extends State<BooksScreen> {
   final _booksService = BooksService();
-  final _shelvesService = ShelvesService();
   List<Book> _books = [];
   List<Shelf> _shelves = [];
   bool _loading = true;
@@ -59,7 +57,9 @@ class _BooksScreenState extends State<BooksScreen> {
     _books = store.books();
     _shelves = store.shelves ?? const [];
     _error = store.error?.toString();
-    _loading = !store.hasLoaded && store.isLoading;
+    // Only spin while there is nothing at all to render yet (no cached or
+    // fetched snapshot).
+    _loading = !store.hasData && store.isLoading;
   }
 
   void _onLibraryChanged() {
@@ -95,31 +95,41 @@ class _BooksScreenState extends State<BooksScreen> {
       builder: (_) => _EditBookDialog(book: book),
     );
     if (meta == null || !mounted) return;
-    try {
-      await _booksService.update(
-        book.id,
-        title: meta.title,
-        author: meta.author,
-        genre: meta.genre,
+    // Optimistic: title/author/genre patch in place immediately, then sync.
+    final ok = await LibraryRefresh.instance.updateBookMeta(
+      book.id,
+      title: meta.title,
+      author: meta.author,
+      genre: meta.genre,
+    );
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Update failed')),
       );
-      if (meta.coverBytes != null && meta.coverName != null) {
-        await _booksService.updateCover(
+      return;
+    }
+    if (meta.coverBytes != null && meta.coverName != null && mounted) {
+      try {
+        // The cover PUT returns the new cover URL; apply it in place.
+        final coverUrl = await _booksService.updateCover(
           book.id,
           coverBytes: meta.coverBytes!,
           coverName: meta.coverName!,
         );
+        if (coverUrl.isNotEmpty && mounted) {
+          LibraryRefresh.instance.applyCover(book.id, coverUrl);
+        }
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Cover update failed: $e')),
+        );
       }
-      LibraryRefresh.instance.bump();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Book updated')),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Update failed: $e')),
-      );
     }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Book updated')),
+    );
   }
 
   Future<void> _moveToShelf(Book book) async {
@@ -128,17 +138,17 @@ class _BooksScreenState extends State<BooksScreen> {
       builder: (context) => _ShelfPickerDialog(shelves: _shelves),
     );
     if (shelf == null || !mounted) return;
-    try {
-      await _shelvesService.addBook(shelf.id, book.id);
-      LibraryRefresh.instance.bump();
-      if (!mounted) return;
+    // Optimistic: membership toggles in place; rolled back on failure.
+    final ok = await LibraryRefresh.instance
+        .moveBookToShelf(shelf.id, book.id, add: true);
+    if (!mounted) return;
+    if (ok) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Added to "${shelf.name}"')),
       );
-    } catch (e) {
-      if (!mounted) return;
+    } else {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not move to shelf: $e')),
+        const SnackBar(content: Text('Could not move to shelf')),
       );
     }
   }
@@ -162,13 +172,11 @@ class _BooksScreenState extends State<BooksScreen> {
       ),
     );
     if (confirmed != true || !mounted) return;
-    try {
-      await _booksService.api.delete('/books/${book.id}');
-      LibraryRefresh.instance.bump();
-    } catch (e) {
-      if (!mounted) return;
+    // Optimistic: the book disappears immediately; rolled back on failure.
+    final ok = await LibraryRefresh.instance.deleteBook(book);
+    if (!ok && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Delete failed: $e')),
+        const SnackBar(content: Text('Delete failed')),
       );
     }
   }
@@ -181,7 +189,10 @@ class _BooksScreenState extends State<BooksScreen> {
 
     return Scaffold(
       floatingActionButton: FloatingActionButton(
-        onPressed: () => UploadFlow.showAddSheet(context, onUploaded: () async {
+        onPressed: () => UploadFlow.showAddSheet(context, onUploaded: (book) async {
+          // Optimistic insert: the book shows up immediately; a background
+          // reload reconciles cover / extraction status.
+          LibraryRefresh.instance.insertBook(book);
           LibraryRefresh.instance.bump();
         }),
         backgroundColor: colors.primaryContainer,
@@ -206,7 +217,7 @@ class _BooksScreenState extends State<BooksScreen> {
     if (_loading) {
       return const Center(child: CircularProgressIndicator());
     }
-    if (_error != null) {
+    if (_error != null && _books.isEmpty) {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),

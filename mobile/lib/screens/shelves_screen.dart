@@ -53,7 +53,7 @@ class _ShelvesScreenState extends State<ShelvesScreen> {
     _books = store.books();
     _shelves = store.shelves ?? const [];
     _error = store.error;
-    _loading = !store.hasLoaded && store.isLoading;
+    _loading = !store.hasData && store.isLoading;
   }
 
   void _onLibraryChanged() {
@@ -88,7 +88,11 @@ class _ShelvesScreenState extends State<ShelvesScreen> {
       builder: (context) => _ShelfFormDialog(
         service: _shelvesService,
         books: _books,
-        onSaved: _refresh,
+        // Optimistic: the shelf appears in the grid the moment it's saved.
+        onSaved: (shelf) async {
+          LibraryRefresh.instance.upsertShelf(shelf);
+          LibraryRefresh.instance.bump();
+        },
       ),
     );
   }
@@ -313,7 +317,7 @@ class _CreateShelfCard extends StatelessWidget {
 class _ShelfFormDialog extends StatefulWidget {
   final ShelvesService service;
   final List<Book> books;
-  final Future<void> Function() onSaved;
+  final Future<void> Function(Shelf shelf) onSaved;
   final Shelf? initial;
   const _ShelfFormDialog({
     required this.service,
@@ -417,7 +421,7 @@ class _ShelfFormDialogState extends State<_ShelfFormDialog> {
           await widget.service.removeBook(shelfId, b.id);
         }
       }
-      await widget.onSaved();
+      await widget.onSaved(shelf);
       if (mounted) Navigator.pop(context);
     } catch (e) {
       if (!mounted) return;
@@ -1382,7 +1386,10 @@ class _ShelfDetailScreenState extends State<_ShelfDetailScreen> {
         service: widget.service,
         books: widget.books,
         initial: _shelf,
-        onSaved: _reload,
+        onSaved: (shelf) async {
+          LibraryRefresh.instance.upsertShelf(shelf);
+          await _reload();
+        },
       ),
     );
   }

@@ -95,10 +95,10 @@ class BooksService {
     });
   }
 
-  /// Replaces a book's cover image.
-  Future<void> updateCover(String id,
+  /// Replaces a book's cover image and returns the new cover URL.
+  Future<String> updateCover(String id,
       {required Uint8List coverBytes, required String coverName}) async {
-    await api.postMultipart(
+    final data = await api.postMultipart(
       '/books/$id/cover',
       method: 'PUT',
       fields: const {},
@@ -111,6 +111,8 @@ class BooksService {
         ),
       ],
     );
+    final url = data is Map ? data['cover_url'] as String? : null;
+    return url ?? '';
   }
 
   Book _reachable(Book b) => Book(
@@ -142,8 +144,22 @@ class BooksService {
   /// Reading position for a book (fraction 0..1 across the whole document).
   Future<double> progress(String bookId) async {
     final data = await api.get('/sync/progress/$bookId') as Map;
-    final page = (data['current_page'] as num?)?.toDouble() ?? 0;
-    final offset = (data['current_offset'] as num?)?.toDouble() ?? 0;
+    return _normaliseProgress(data);
+  }
+
+  /// Reading progress for every owned book in one request (fraction 0..1),
+  /// so a library refresh is O(1) calls instead of one per book.
+  Future<Map<String, double>> allProgress() async {
+    final data = await api.get('/books/progress') as List;
+    return {
+      for (final item in data.whereType<Map>())
+        item['book_id'] as String: _normaliseProgress(item),
+    };
+  }
+
+  static double _normaliseProgress(Map item) {
+    final page = (item['current_page'] as num?)?.toDouble() ?? 0;
+    final offset = (item['current_offset'] as num?)?.toDouble() ?? 0;
     // current_offset carries the overall fraction (mobile writer). The web
     // writes a 0-100 percentage into current_page, so normalise that to a
     // fraction too -- otherwise a book read on web resumes at the wrong place

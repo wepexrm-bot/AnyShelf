@@ -12,6 +12,7 @@ import '../models/book.dart';
 import '../models/annotation.dart';
 import '../models/reader_settings.dart';
 import '../services/books_service.dart';
+import '../services/library_refresh.dart';
 import '../services/settings_service.dart';
 import '../theme/reader_atmosphere.dart';
 import '../theme/serene_theme.dart';
@@ -175,6 +176,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
     if (_restoringScroll) return;
     if (_progress > 0) {
       _booksService.saveProgress(widget.book.id, fraction: _progress);
+      // Mirror into the shared store so "Continue Reading" reflects the new
+      // position without waiting for a reload.
+      LibraryRefresh.instance.applyProgress(widget.book.id, _progress);
     }
   }
 
@@ -1148,6 +1152,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     _saveTimer?.cancel();
     _saveTimer = Timer(const Duration(seconds: 1), () {
       _booksService.saveProgress(widget.book.id, fraction: _progress);
+      LibraryRefresh.instance.applyProgress(widget.book.id, _progress);
     });
   }
 

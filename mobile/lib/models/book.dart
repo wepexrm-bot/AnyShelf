@@ -51,6 +51,38 @@ class Book {
             : null,
       );
 
+  /// Serialises a book for the offline library cache. Deliberately excludes
+  /// presigned URLs (pdf_url / structured_text_url) -- they expire and are
+  /// only meaningful for the session that fetched them.
+  Map<String, dynamic> toCacheJson() => {
+        'id': id,
+        'title': title,
+        'author': author,
+        'genre': genre,
+        'cover_url': coverUrl,
+        'extraction_status': extractionStatus,
+        'reflow_confidence': reflowConfidence,
+        'is_scanned': isScanned,
+        'progress': progress,
+        'created_at': createdAt?.toIso8601String(),
+      };
+
+  /// Rebuilds a cached book (mirror of [toCacheJson]).
+  factory Book.fromCacheJson(Map<String, dynamic> json) => Book(
+        id: json['id'] as String,
+        title: (json['title'] as String?) ?? 'Untitled',
+        author: json['author'] as String?,
+        genre: json['genre'] as String?,
+        coverUrl: json['cover_url'] as String?,
+        extractionStatus: json['extraction_status'] as String?,
+        reflowConfidence: (json['reflow_confidence'] as num?)?.toDouble(),
+        isScanned: json['is_scanned'] as bool? ?? false,
+        progress: (json['progress'] as num?)?.toDouble(),
+        createdAt: json['created_at'] != null
+            ? DateTime.tryParse(json['created_at'] as String)
+            : null,
+      );
+
   Book copyWith({double? progress}) => Book(
         id: id,
         title: title,

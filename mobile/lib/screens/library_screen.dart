@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 
 import '../models/book.dart';
 import '../models/shelf.dart';
-import '../services/books_service.dart';
 import '../services/library_refresh.dart';
 import '../theme/serene_theme.dart';
 import '../theme/serene_tokens.dart';
@@ -27,7 +26,6 @@ class LibraryScreen extends StatefulWidget {
 }
 
 class _LibraryScreenState extends State<LibraryScreen> {
-  final _booksService = BooksService();
   List<Book> _books = [];
   List<Shelf> _shelves = [];
   bool _loading = true;
@@ -56,7 +54,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _books = store.books();
     _shelves = store.shelves ?? const [];
     _error = store.error;
-    _loading = !store.hasLoaded && store.isLoading;
+    // Only spin while there is nothing at all to render yet (no cached or
+    // fetched snapshot). Cached data shows immediately; the empty state only
+    // appears once data genuinely exists and is empty.
+    _loading = !store.hasData && store.isLoading;
   }
 
   void _onLibraryChanged() {
@@ -109,13 +110,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
       ),
     );
     if (confirmed != true) return;
-    try {
-      await _booksService.api.delete('/books/${book.id}');
-      LibraryRefresh.instance.bump();
-    } catch (e) {
-      if (!mounted) return;
+    // Optimistic: the book disappears immediately; it's rolled back if the
+    // server rejects the delete.
+    final ok = await LibraryRefresh.instance.deleteBook(book);
+    if (!ok && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Delete failed: $e')),
+        const SnackBar(content: Text('Delete failed')),
       );
     }
   }
@@ -128,7 +128,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
     return Scaffold(
       floatingActionButton: FloatingActionButton(
-        onPressed: () => UploadFlow.showAddSheet(context, onUploaded: () async {
+        onPressed: () => UploadFlow.showAddSheet(context, onUploaded: (book) async {
+          // Optimistic insert: the book shows up immediately; a background
+          // reload reconciles cover / extraction status.
+          LibraryRefresh.instance.insertBook(book);
           LibraryRefresh.instance.bump();
         }),
         backgroundColor: colors.primaryContainer,

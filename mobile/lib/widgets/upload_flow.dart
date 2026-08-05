@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
+import '../models/book.dart';
 import '../services/books_service.dart';
 import '../theme/serene_theme.dart';
 import '../theme/serene_tokens.dart';
@@ -16,7 +17,7 @@ class UploadFlow {
 
   static Future<void> showAddSheet(
     BuildContext context, {
-    required Future<void> Function() onUploaded,
+    required Future<void> Function(Book book) onUploaded,
   }) async {
     final colors = Theme.of(context).extension<SereneTheme>()!.colors;
     // The sheet's builder context is disposed as soon as it pops, so the
@@ -74,7 +75,7 @@ class UploadFlow {
 
   static Future<void> _pickAndUpload(
     BuildContext context,
-    Future<void> Function() onUploaded,
+    Future<void> Function(Book book) onUploaded,
   ) async {
     final file = await _pickPdf();
     if (file == null) return;
@@ -102,7 +103,7 @@ class UploadFlow {
     BuildContext context,
     XFile file,
     _UploadMeta meta,
-    Future<void> Function() onUploaded,
+    Future<void> Function(Book book) onUploaded,
   ) async {
     final navigator = Navigator.of(context);
     var dialogRoute = DialogRoute<void>(
@@ -118,7 +119,7 @@ class UploadFlow {
     }
 
     try {
-      await BooksService().upload(
+      final data = await BooksService().upload(
         filename: file.name,
         fileStream: file.openRead(),
         fileLength: await file.length(),
@@ -133,7 +134,16 @@ class UploadFlow {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Upload queued — extracting pages…')),
       );
-      await onUploaded();
+      // Hand the caller a minimal Book so it can appear in the library
+      // immediately; a reload fills in the cover and extraction status.
+      await onUploaded(Book(
+        id: (data['book_id'] as String?) ?? '',
+        title: meta.title,
+        author: meta.author.trim().isEmpty ? null : meta.author.trim(),
+        genre: meta.genre,
+        extractionStatus: (data['extraction_status'] as String?) ?? 'pending',
+        createdAt: DateTime.now(),
+      ));
     } catch (e) {
       if (!context.mounted) return;
       closeDialog();
