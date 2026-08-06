@@ -83,6 +83,54 @@ function hexToRgba(hex, alpha) {
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
 }
 
+// Text mode substitutes the chosen webfont for the PDF's own fonts. To keep the
+// re-laid-out text within the page box we fit each line with scaleX, exactly like
+// the lab reader. Widths are measured with a 2D canvas `measureText` (viewport
+// independent) rather than the DOM, because offscreen pages are virtualized with
+// `content-visibility: auto` and would not have laid-out metrics to read.
+let measureCtx = null;
+function measureTextWidth(text, font) {
+  if (!measureCtx) measureCtx = document.createElement("canvas").getContext("2d");
+  measureCtx.font = font;
+  return measureCtx.measureText(text).width;
+}
+
+function runFont(r, scale, theme) {
+  const weight = r.flags & 16 ? 700 : 400;
+  const style = r.flags & 2 ? "italic " : "";
+  return `${style}${weight} ${Math.max(1, r.fs * scale)}px ${theme.font}`;
+}
+
+// Per-line scaleX fit, replicating the lab's applyTextScaling: each run is
+// squashed to fit its original slot (its own width, the gap to the next run on
+// the line, or the page edge), whichever is smallest.
+function lineScaleX(annotated, scale, renderWidth, theme) {
+  const pageW = renderWidth;
+  const lines = new Map();
+  for (const r of annotated) {
+    const top = Math.round((r.y - r.fs) * scale);
+    if (!lines.has(top)) lines.set(top, []);
+    lines.get(top).push(r);
+  }
+  const out = new Map();
+  for (const arr of lines.values()) {
+    arr.sort((a, b) => a.x - b.x);
+    for (let i = 0; i < arr.length; i++) {
+      const r = arr[i];
+      const left = r.x * scale;
+      const ow = (r.w || 0) * scale;
+      if (!(ow > 0)) continue;
+      const nextLeft = i + 1 < arr.length ? arr[i + 1].x * scale : Infinity;
+      const target = Math.min(ow, nextLeft - left, pageW - left) * 0.995;
+      if (!(target > 0)) continue;
+      const measured = measureTextWidth(r.t, runFont(r, scale, theme));
+      if (!(measured > 0)) continue;
+      out.set(r.start, target / measured);
+    }
+  }
+  return out;
+}
+
 const PageSurface = React.memo(function PageSurface({
   page,
   pageIdx,
@@ -96,6 +144,7 @@ const PageSurface = React.memo(function PageSurface({
   virtualized = false,
 }) {
   const canvasRef = useRef(null);
+  const [fontTick, setFontTick] = useState(0);
   // renderWidth is the already-zoomed page box width, so the scale directly
   // maps PDF coords onto the box (text and box grow together — nothing clips).
   const scale = renderWidth / (page.width || 1);
@@ -116,11 +165,44 @@ const PageSurface = React.memo(function PageSurface({
   const inHighlight = (run) =>
     pageHighlights.some((h) => h.start < run.end && h.end > run.start);
 
+  const hasText = runs.length > 0;
+  const textMode = !!theme.textMode && hasText;
+  // Scanned pages (no runs) always show the PDF canvas so text mode never blanks
+  // them out — same gating as the lab reader's `.hastext`.
+  const canvasVisible = !textMode;
+
+  // Text mode: once the chosen webfont is loaded, compute the per-line scaleX
+  // fit. Bumping fontTick re-runs the memo so widths are measured with the real
+  // font (handles both initial load and a later Font Family change).
+  useEffect(() => {
+    if (!textMode) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        await document.fonts.ready;
+        const spec = runFont(annotated[0] || { fs: 12, flags: 0 }, scale, theme);
+        try {
+          await document.fonts.load(spec);
+        } catch {}
+      } catch {}
+      if (!cancelled) setFontTick((t) => t + 1);
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [textMode, scale, theme.font, annotated]);
+
+  const scaleXByRun = useMemo(
+    () => (textMode ? lineScaleX(annotated, scale, renderWidth, theme) : new Map()),
+    [textMode, annotated, scale, renderWidth, theme, fontTick]
+  );
+
   // Render the page canvas with pdf.js at the current scale. pdf.js pages are
   // cached internally by getDocument(), so re-rendering on zoom only repaints
   // the canvas. In-flight tasks are cancelled on scale change / unmount.
   useEffect(() => {
-    if (!pdfDoc || !active) return;
+    if (!pdfDoc || !active || !canvasVisible) return;
     let cancelled = false;
     let task = null;
     (async () => {
@@ -147,7 +229,7 @@ const PageSurface = React.memo(function PageSurface({
         } catch {}
       }
     };
-  }, [pdfDoc, pageIdx, scale, active]);
+  }, [pdfDoc, pageIdx, scale, active, canvasVisible]);
 
   const handleSelection = () => {
     if (!onSelectionCapture) return;
@@ -188,7 +270,7 @@ const PageSurface = React.memo(function PageSurface({
         width: renderWidth,
         height: aspectHeight,
         margin: "0 auto",
-        background: theme.surface,
+        background: textMode ? theme.background : theme.surface,
         boxShadow: "0 2px 14px rgba(63,56,39,0.14)",
         borderRadius: 6,
         overflow: "hidden",
@@ -206,11 +288,12 @@ const PageSurface = React.memo(function PageSurface({
           width: "100%",
           height: "100%",
           filter,
-          display: "block",
+          display: canvasVisible ? "block" : "none",
         }}
       />
-      {/* Transparent selectable text layer: colour matches the filtered page so
-          selection/highlight geometry sits exactly over the rendered glyphs. */}
+      {/* Text layer: in PDF mode it is transparent and only provides
+          selection/highlight geometry over the canvas; in text mode the canvas
+          is hidden and the runs are drawn in the chosen font + theme colour. */}
       <div className="tl" style={{ position: "absolute", inset: 0, overflow: "hidden", lineHeight: 1 }}>
         {annotated.map((r, i) => {
           const hl = inHighlight(r);
@@ -227,7 +310,9 @@ const PageSurface = React.memo(function PageSurface({
                 fontSize: r.fs * scale,
                 whiteSpace: "pre",
                 transformOrigin: "0 0",
-                color: "transparent",
+                transform: textMode && scaleXByRun.has(r.start) ? `scaleX(${scaleXByRun.get(r.start)})` : undefined,
+                color: textMode ? theme.textColor : "transparent",
+                fontFamily: textMode ? theme.font : undefined,
                 fontWeight: (r.flags & 16) ? 700 : 400,
                 fontStyle: (r.flags & 2) ? "italic" : "normal",
                 background: hl ? hexToRgba(pageHighlights.find((h) => h.start < r.end && h.end > r.start).color, 0.45) : undefined,

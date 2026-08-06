@@ -29,6 +29,14 @@ function storedZoom() {
   return "width";
 }
 
+function storedTextMode() {
+  try {
+    const raw = JSON.parse(localStorage.getItem("reader_textmode"));
+    if (typeof raw === "boolean") return raw;
+  } catch {}
+  return true;
+}
+
 const DEFAULT_THEME = {
   themeId: "light",
   background: "#fcf9f8",
@@ -43,6 +51,7 @@ const DEFAULT_THEME = {
   mode: "scroll",
   pageLayout: "single",
   zoom: storedZoom(),
+  textMode: storedTextMode(),
 };
 
 function hexToRgba(hex, alpha) {
@@ -665,6 +674,23 @@ export default function Reader() {
               <span className="icon" style={{ fontSize: 20 }}>menu_book</span>
             </button>
           </div>
+          <button
+            className="btn-icon"
+            title={theme.textMode ? "Text mode: on (click to show original PDF)" : "Text mode: off (click to use your font)"}
+            onClick={() => {
+              setTheme((t) => ({ ...t, textMode: !t.textMode }));
+              try {
+                localStorage.setItem("reader_textmode", JSON.stringify(!theme.textMode));
+              } catch {}
+            }}
+            style={
+              theme.textMode
+                ? { color: "var(--primary)", background: "var(--surface-container-high)" }
+                : undefined
+            }
+          >
+            <span className="icon" style={{ fontSize: 20 }}>text_fields</span>
+          </button>
           <button
             className="btn-icon"
             title="Highlights & notes"

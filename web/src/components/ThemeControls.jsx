@@ -118,10 +118,12 @@ export default function ThemeControls({ theme, setTheme, onClose }) {
       mode: "scroll",
       pageLayout: "single",
       zoom: "width",
+      textMode: true,
     };
     setTheme(defaults);
     try {
       localStorage.removeItem("reader_zoom");
+      localStorage.removeItem("reader_textmode");
     } catch {}
     setDirty(false);
     try {
