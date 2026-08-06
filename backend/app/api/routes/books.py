@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import uuid
 
 from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException, BackgroundTasks
@@ -305,6 +306,51 @@ def get_extraction_progress(
     return {"extraction_status": status, "progress": progress}
 
 
+def _stage_re_extract(db: Session, book: Book) -> str | None:
+    """Download the book's PDF to a temp file and mark it ``processing``.
+
+    Returns the temp file path, or ``None`` if the PDF could not be read.
+    The caller is responsible for running extraction on the returned path.
+    """
+    try:
+        pdf_bytes = download_bytes(book.storage_key)
+    except Exception as exc:
+        logger.exception("Could not download PDF for re-extract %s: %s", book.id, exc)
+        return None
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(pdf_bytes)
+        tmp_path = tmp.name
+
+    # Flip the status synchronously so an immediate /progress poll reports
+    # "processing" instead of racing the background task's own flip.
+    book.extraction_status = "processing"
+    book.extraction_progress = 0
+    db.commit()
+    return tmp_path
+
+
+def re_extract_book_job(book_id: str):
+    """Re-extract a book from a fresh DB session, running extraction in a
+    daemon thread.
+
+    Used by the startup lifespan to auto-heal books left at ``processing``
+    when a previous process was recycled mid-job (Render free tier can sleep
+    or restart). Skips books already being extracted.
+    """
+    tmp_path = None
+    db = SessionLocal()
+    try:
+        book = db.query(Book).filter(Book.id == book_id).first()
+        if not book or book.extraction_status == "processing":
+            return
+        tmp_path = _stage_re_extract(db, book)
+    finally:
+        db.close()
+    if tmp_path:
+        threading.Thread(target=process_extraction, args=(book_id, tmp_path), daemon=True).start()
+
+
 @router.post("/{book_id}/re-extract")
 def re_extract_book(
     book_id: str,
@@ -325,21 +371,10 @@ def re_extract_book(
     if book.extraction_status == "processing":
         raise HTTPException(status_code=409, detail="Extraction already in progress")
 
-    try:
-        pdf_bytes = download_bytes(book.storage_key)
-    except Exception as exc:
-        logger.exception("Could not download PDF for re-extract %s: %s", book_id, exc)
+    tmp_path = _stage_re_extract(db, book)
+    if tmp_path is None:
         raise HTTPException(status_code=400, detail="Could not read the original PDF")
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(pdf_bytes)
-        tmp_path = tmp.name
-
-    # Flip the status synchronously so an immediate /progress poll reports
-    # "processing" instead of racing the background task's own flip.
-    book.extraction_status = "processing"
-    book.extraction_progress = 0
-    db.commit()
     background_tasks.add_task(process_extraction, book.id, tmp_path)
 
     return {"id": book.id, "status": "processing", "extraction_status": "processing"}

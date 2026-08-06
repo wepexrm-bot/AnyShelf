@@ -274,6 +274,7 @@ export default function BookActionsMenu({ book, onChanged }) {
   const [open, setOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [shelfOpen, setShelfOpen] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const ref = useRef(null);
 
   useEffect(() => {
@@ -292,6 +293,20 @@ export default function BookActionsMenu({ book, onChanged }) {
     } catch {}
   };
 
+  const retry = async () => {
+    if (retrying) return;
+    setRetrying(true);
+    try {
+      await api(`/books/${book.id}/re-extract`, { method: "POST" });
+      onChanged();
+    } catch (err) {
+      alert(err.message || "Could not retry extraction");
+    } finally {
+      setRetrying(false);
+      setOpen(false);
+    }
+  };
+
   return (
     <div ref={ref} className="book-actions">
       <button
@@ -304,6 +319,16 @@ export default function BookActionsMenu({ book, onChanged }) {
 
       {open && (
         <div className="book-actions__menu">
+          {book.extraction_status === "failed" && (
+            <button
+              className="book-actions__item"
+              onClick={retry}
+              disabled={retrying}
+            >
+              <span className="icon">refresh</span>
+              {retrying ? "Retrying…" : "Retry extraction"}
+            </button>
+          )}
           <button
             className="book-actions__item"
             onClick={() => {

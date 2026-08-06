@@ -15,27 +15,31 @@ logger = logging.getLogger("cloudread.main")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """On startup, un-stick any extraction that died with the last process.
+    """On startup, auto-heal extractions that died with the last process.
 
     Render free-tier instances can be recycled mid-job, which leaves a book
     stuck at ``processing`` forever (and ``re-extract`` refuses it with 409).
-    Reset those to ``failed`` so the client stops polling and the user can
-    retry.
+    Kick off a fresh extraction in the background for each stuck book instead
+    of just marking it failed -- progress resumes from the persisted column.
     """
     from app.core.models import Book
+    from app.api.routes.books import re_extract_book_job
 
     db = SessionLocal()
+    stuck_ids: list[str] = []
     try:
         stuck = db.query(Book).filter(Book.extraction_status == "processing").all()
         for book in stuck:
-            book.extraction_status = "failed"
-            logger.info("Reset book %s stuck at 'processing' to 'failed'", book.id)
-        if stuck:
-            db.commit()
+            stuck_ids.append(str(book.id))
+            logger.info("Resuming extraction for book %s stuck at 'processing'", book.id)
     except Exception:
-        logger.exception("Could not reset stuck extractions on startup")
+        logger.exception("Could not list stuck extractions on startup")
     finally:
         db.close()
+
+    for book_id in stuck_ids:
+        re_extract_book_job(book_id)
+
     yield
 
 

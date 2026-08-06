@@ -194,6 +194,16 @@ export default function Library() {
     await loadAll();
   };
 
+  const retryExtraction = async (bookId) => {
+    try {
+      await api(`/books/${bookId}/re-extract`, { method: "POST" });
+      startPolling(bookId);
+      await loadAll();
+    } catch (err) {
+      alert(err.message || "Could not retry extraction");
+    }
+  };
+
   const [menuFor, setMenuFor] = useState(null);
   const menuRef = useRef(null);
 
@@ -499,11 +509,23 @@ export default function Library() {
                         {book.is_scanned && <span className="badge badge-secondary">scanned</span>}
                       </div>
                       <div className="text-muted" style={{ fontSize: 12 }}>
-                        {book.extraction_status === "failed"
-                          ? "Extraction failed"
-                          : book.extraction_status === "done"
-                          ? null
-                          : `Extracting… ${extractionFor(book).progress}%`}
+                        {book.extraction_status === "failed" ? (
+                          <button
+                            onClick={() => retryExtraction(book.id)}
+                            title="Retry extraction"
+                            style={{
+                              background: "none",
+                              border: "none",
+                              padding: 0,
+                              color: "var(--primary)",
+                              cursor: "pointer",
+                              fontSize: 12,
+                              fontFamily: "inherit",
+                            }}
+                          >
+                            Extraction failed — Retry
+                          </button>
+                        ) : book.extraction_status === "done" ? null : `Extracting… ${extractionFor(book).progress}%`}
                       </div>
                     </div>
                     <div style={{ width: 120, flexShrink: 0 }}>
