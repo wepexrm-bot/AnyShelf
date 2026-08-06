@@ -57,7 +57,7 @@ function zoomIsActive(theme, preset) {
   return theme.zoom === preset.value || (theme.zoom == null && preset.value === "width");
 }
 
-export default function ThemeControls({ theme, setTheme, reflowAvailable, onClose }) {
+export default function ThemeControls({ theme, setTheme, onClose }) {
   const [dirty, setDirty] = useState(false);
   const [fontOpen, setFontOpen] = useState(false);
   const fontMenuRef = useRef(null);

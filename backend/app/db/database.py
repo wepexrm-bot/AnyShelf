@@ -19,6 +19,9 @@ Base = declarative_base()
 # idempotent ALTERs on every boot (each guarded by IF NOT EXISTS).
 _MIGRATIONS = [
     "ALTER TABLE books ADD COLUMN IF NOT EXISTS extraction_progress INTEGER DEFAULT 0",
+    # reflow_confidence was removed from the model; drop it if a legacy DB
+    # still has the column.
+    "ALTER TABLE books DROP COLUMN IF EXISTS reflow_confidence",
 ]
 
 

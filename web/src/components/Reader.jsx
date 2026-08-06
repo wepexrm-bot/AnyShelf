@@ -2,7 +2,21 @@
 import { useParams, useNavigate, useLocation } from "react-router-dom";
 import ThemeControls, { FONT_OPTIONS, THEME_PRESETS } from "./ThemeControls";
 import { TextLayerScrollView, TextLayerPaginateView, resolveHighlights } from "./TextLayerView";
+import { loadPdf } from "../pdfjs";
 import { api } from "../api";
+
+// Page boxes for books without a textlayer-v1 extraction: derive them from the
+// PDF itself so the book still renders as real pages (no selectable overlay
+// until the book is re-extracted).
+async function pdfPagesFromDoc(pdfDoc) {
+  const pages = [];
+  for (let i = 1; i <= pdfDoc.numPages; i++) {
+    const p = await pdfDoc.getPage(i);
+    const vp = p.getViewport({ scale: 1 });
+    pages.push({ page: i, width: vp.width, height: vp.height, rotation: vp.rotation, runs: [] });
+  }
+  return pages;
+}
 
 // Zoom is client-side only (per browser) so it never collides with the shared
 // server `font_size` field that mobile uses for its own zoom control.
@@ -86,7 +100,8 @@ export default function Reader() {
   const backTo = location.state?.from || "/";
   const [book, setBook] = useState(null);
   const [structuredText, setStructuredText] = useState(null);
-  const [imagesByPage, setImagesByPage] = useState(() => new Map());
+  const [pdfDoc, setPdfDoc] = useState(null);
+  const [layoutPages, setLayoutPages] = useState(null);
   const [extraction, setExtraction] = useState(null);
   const [theme, setTheme] = useState(DEFAULT_THEME);
   const [panel, setPanel] = useState(null);
@@ -97,20 +112,14 @@ export default function Reader() {
   const [pageCount, setPageCount] = useState(0);
   const scrollRef = useRef(null);
   const pageRefs = useRef([]);
-  const reExtractRequestedRef = useRef(false);
   const settingsHydratedRef = useRef(false);
   const [jumpValue, setJumpValue] = useState("1");
   const [jumpFocused, setJumpFocused] = useState(false);
   const [chromeVisible, setChromeVisible] = useState(true);
 
-  const hasTextLayer = useMemo(
-    () => !!structuredText?.pages?.some((p) => (p.runs || []).length > 0),
-    [structuredText]
-  );
-
   const highlights = useMemo(
-    () => (structuredText?.pages ? resolveHighlights(annotations, structuredText.pages) : new Map()),
-    [annotations, structuredText]
+    () => (layoutPages?.length ? resolveHighlights(annotations, layoutPages) : new Map()),
+    [annotations, layoutPages]
   );
 
   const handlePageNav = useCallback((idx, total) => {
@@ -239,6 +248,8 @@ export default function Reader() {
     const loadBook = async () => {
       setBook(null);
       setStructuredText(null);
+      setPdfDoc(null);
+      setLayoutPages(null);
       setPageCount(0);
       setProgress(0);
       setProgressLoaded(false);
@@ -256,8 +267,8 @@ export default function Reader() {
       );
       if (extractingNow && !timer) timer = setTimeout(poll, 1000);
 
+      let st = null;
       if (data.structured_text_url) {
-        let st = null;
         for (let attempt = 0; attempt < 3 && !st; attempt++) {
           try {
             const res = await fetch(data.structured_text_url);
@@ -270,46 +281,33 @@ export default function Reader() {
         }
         if (cancelled) return;
         setStructuredText(st);
-        totalPages = st?.pages?.length || 0;
-        setPageCount(totalPages);
+      }
 
-        // Per-page placed images (cover art / illustrations), stored in object
-        // storage by the extractor. Fetch lazily so the text layer renders
-        // immediately; images stream in behind it.
-        if (st?.pages?.length && !cancelled) {
-          try {
-            const imgData = await api(`/books/${bookId}/images`);
-            const map = new Map();
-            for (const p of imgData.pages || []) {
-              if (p.images?.length) map.set(p.page, p.images);
-            }
-            if (!cancelled) setImagesByPage(map);
-          } catch {}
-        }
-
-        // Legacy books store pre-text-layer reflow JSON (no `schema`/`runs`).
-        // Auto re-extract once per session so they get the new text layer
-        // instead of the "not re-extracted yet" fallback. textlayer-v1 books
-        // with no runs (e.g. scanned with OCR unavailable) are NOT legacy --
-        // re-extracting them would change nothing.
-        const legacyFormat = !!st && st.schema !== "textlayer-v1";
-        if (
-          legacyFormat &&
-          !reExtractRequestedRef.current &&
-          data.extraction_status !== "pending" &&
-          data.extraction_status !== "processing"
-        ) {
-          reExtractRequestedRef.current = true;
-          try {
-            await api(`/books/${bookId}/re-extract`, { method: "POST" });
-            if (cancelled) return;
-            setExtraction({ status: "processing", progress: 0 });
-            if (!timer) timer = setTimeout(poll, 1000);
-          } catch {
-            reExtractRequestedRef.current = false;
-          }
+      // Render the real PDF with pdf.js (images/vectors/fonts faithful). A
+      // textlayer-v1 extraction supplies the selectable runs + page boxes;
+      // otherwise the page boxes are synthesized from the PDF so the book
+      // still renders (with no text overlay until it is re-extracted).
+      let layoutPages = null;
+      let loadedPdf = null;
+      if (data.pdf_url && !cancelled) {
+        try {
+          loadedPdf = await loadPdf(data.pdf_url);
+          if (cancelled) return;
+          setPdfDoc(loadedPdf);
+        } catch {
+          // PDF render is best-effort; the text layer still works standalone.
         }
       }
+      if (st?.schema === "textlayer-v1" && st?.pages?.length) {
+        layoutPages = st.pages;
+      } else if (loadedPdf) {
+        layoutPages = await pdfPagesFromDoc(loadedPdf);
+        if (cancelled) return;
+      }
+      if (cancelled) return;
+      setLayoutPages(layoutPages);
+      totalPages = layoutPages?.length || 0;
+      setPageCount(totalPages);
 
       const [savedSettings, savedProgress, savedAnnotations] = await Promise.all([
         api("/settings/").catch(() => null),
@@ -426,7 +424,7 @@ export default function Reader() {
   // web fonts finish loading so a late reflow doesn't throw off the spot.
   const lastRestoreTopRef = useRef(-1);
   useEffect(() => {
-    if (theme.mode !== "scroll" || !book || !structuredText || !progressLoaded) return;
+    if (theme.mode !== "scroll" || !book || !layoutPages?.length || !progressLoaded) return;
     lastRestoreTopRef.current = -1;
     let cancelled = false;
     const restore = () => {
@@ -450,7 +448,7 @@ export default function Reader() {
     return () => {
       cancelled = true;
     };
-  }, [theme.mode, book, structuredText, progressLoaded]);
+  }, [theme.mode, book, layoutPages, progressLoaded]);
 
   // Sync progress + record session when scrolling settles
   useEffect(() => {
@@ -698,15 +696,15 @@ export default function Reader() {
             overflowX: theme.mode === "paginate" ? "hidden" : "auto",
           }}
         >
-          {hasTextLayer ? (
+          {layoutPages?.length ? (
             theme.mode === "paginate" ? (
               <TextLayerPaginateView
                 key={book.id}
-                pages={structuredText.pages}
+                pages={layoutPages}
                 theme={theme}
                 pageLayout={theme.pageLayout}
                 highlights={highlights}
-                imagesByPage={imagesByPage}
+                pdfDoc={pdfDoc}
                 page={Math.min(Math.max(currentPage - 1, 0), pageCount - 1)}
                 onPageChange={handlePageNav}
                 onSelectionCapture={createHighlight}
@@ -714,27 +712,19 @@ export default function Reader() {
             ) : (
               <TextLayerScrollView
                 key={book.id}
-                pages={structuredText.pages}
+                pages={layoutPages}
                 theme={theme}
                 highlights={highlights}
-                imagesByPage={imagesByPage}
+                pdfDoc={pdfDoc}
                 pageRefs={pageRefs}
                 onSelectionCapture={createHighlight}
               />
             )
           ) : (
             <div style={{ maxWidth: 720, margin: "0 auto", padding: "48px 24px 120px" }}>
-              <p className="text-muted" style={{ marginBottom: 16 }}>
-                This book hasn't been re-extracted with the text-layer format yet. It will appear
-                here once processed — until then, view the original PDF below.
+              <p className="text-muted">
+                No readable pages are available for this book yet.
               </p>
-              {book.pdf_url && (
-                <iframe
-                  title="pdf"
-                  src={book.pdf_url}
-                  style={{ width: "100%", height: "76vh", border: "1px solid var(--outline-variant)", borderRadius: 8 }}
-                />
-              )}
             </div>
           )}
         </div>
@@ -777,7 +767,6 @@ export default function Reader() {
               <ThemeControls
                 theme={theme}
                 setTheme={setTheme}
-                reflowAvailable={hasTextLayer}
                 onClose={() => setPanel(null)}
               />
             )}

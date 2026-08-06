@@ -1,11 +1,11 @@
 """One-time maintenance script: re-extract every book into the new text-layer
 format (``textlayer-v1``).
 
-Books uploaded before the text-layer engine replaced the reflow pipeline store
-old reflow-block JSON under ``structured_text_key``. This script downloads each
-book's original PDF from object storage, re-runs the extraction pipeline, and
-rewrites the stored JSON plus the book's confidence/is_scanned/page_count
-columns. It is idempotent and safe to re-run.
+Books uploaded before the text-layer engine store old reflow-block JSON under
+``structured_text_key``. This script downloads each book's original PDF from
+object storage, re-runs the extraction pipeline, and rewrites the stored JSON
+plus the book's is_scanned/page_count columns. It is idempotent and safe to
+re-run.
 
 Usage (from backend/):
     venv\\Scripts\\python -m scripts.re_extract
@@ -15,7 +15,6 @@ import json
 import logging
 import os
 import tempfile
-import uuid
 
 from app.core.models import Book
 from app.core.storage import download_bytes, upload_bytes
@@ -40,12 +39,7 @@ def main():
                     tmp.write(pdf_bytes)
                     tmp_path = tmp.name
                 try:
-                    def upload_page_image(data: bytes, ext: str) -> str:
-                        key = f"images/{book.owner_id}/{book.id}/{uuid.uuid4().hex}.{ext}"
-                        upload_bytes(data, storage_key=key, content_type="image/jpeg" if ext == "jpg" else "image/png")
-                        return key
-
-                    result = run_pipeline(tmp_path, image_uploader=upload_page_image)
+                    result = run_pipeline(tmp_path)
                 finally:
                     try:
                         os.remove(tmp_path)
@@ -60,12 +54,11 @@ def main():
                 )
 
                 book.structured_text_key = structured_key
-                book.reflow_confidence = result["text_confidence"]
                 book.is_scanned = result["is_scanned"]
                 book.page_count = len(result["pages"])
                 book.extraction_status = "done"
                 db.commit()
-                logger.info("Re-extracted %s (%s): %d pages, coverage %s", book.id, book.title, book.page_count, book.reflow_confidence)
+                logger.info("Re-extracted %s (%s): %d pages, coverage %s", book.id, book.title, book.page_count, result["text_confidence"])
                 ok += 1
             except Exception as exc:
                 logger.exception("Re-extract failed for book %s (%s): %s", book.id, book.title, exc)

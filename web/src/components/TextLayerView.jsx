@@ -1,9 +1,11 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 // Rendering for the backend text-layer JSON (schema `textlayer-v1`): each PDF
-// page is a positioned set of text runs (x/baseline/font-size/advance), rendered
-// in the reader font with per-line scaleX fitting -- the same technique as the
-// extraction-lab reader, so the PDF's native layout is preserved faithfully.
+// page is rendered faithfully with pdf.js (so images, vector art, backgrounds
+// and the PDF's own fonts look exactly as the original), and the backend text
+// runs are laid on top as a transparent, selectable text layer. This is the
+// same technique as the extraction-lab reader's PDF view: the page is the PDF
+// itself, and the runs only provide selection/highlight/search anchors.
 
 const PAGE_INSETS = { small: 48, medium: 96, large: 144 };
 const SCROLL_MAX_WIDTH = 860;
@@ -58,67 +60,27 @@ export function resolveHighlights(annotations, pages) {
   return byPage;
 }
 
-// Per-page fit measurements, cached by (page signature, font, width, zoom).
-// Values are only stored AFTER the reader font has finished loading, so a hit
-// never re-applies fallback-font scaleX (which previously made words collapse).
-const fitCache = new Map();
+// The page surface is themed by re-filtering the rendered PDF (same CSS filters
+// the lab reader applies to its canvas), so dark/night/sepia modes keep the
+// original page readable without re-drawing the text.
+const THEME_FILTERS = {
+  light: "none",
+  dark: "invert(1) hue-rotate(180deg)",
+  night: "invert(1) hue-rotate(180deg) saturate(0.85)",
+  sepia: "sepia(0.45) saturate(1.1)",
+  paper: "sepia(0.55) saturate(0.95)",
+  modern: "none",
+  mint: "sepia(0.25) hue-rotate(70deg) saturate(0.85)",
+  rose: "sepia(0.3) hue-rotate(330deg) saturate(0.95)",
+  ocean: "sepia(0.2) hue-rotate(190deg) saturate(0.85)",
+  forest: "sepia(0.3) hue-rotate(75deg) saturate(0.8)",
+};
 
-// Port of the lab reader's applyTextScaling: compute each span's scaleX so the
-// reader font stretches to the PDF's intended advance width. Measurement uses
-// an offscreen canvas (pure math, no DOM reads) so fitting many spans never
-// triggers a forced reflow.
-function measureFit(root, fontFamily, pageW) {
-  const spans = [...root.querySelectorAll("span.tl")];
-  const idxBySpan = new Map(spans.map((s, i) => [s, i]));
-  const sx = new Array(spans.length).fill(undefined);
-  const ctx = document.createElement("canvas").getContext("2d");
-  const lines = new Map();
-  for (const s of spans) {
-    const top = Math.round(parseFloat(s.style.top));
-    if (!lines.has(top)) lines.set(top, []);
-    lines.get(top).push(s);
-  }
-  for (const arr of lines.values()) {
-    arr.sort((a, b) => parseFloat(a.style.left) - parseFloat(b.style.left));
-    for (let i = 0; i < arr.length; i++) {
-      const s = arr[i];
-      const fs = parseFloat(s.style.fontSize);
-      const ow = parseFloat(s.dataset.ow);
-      const left = parseFloat(s.style.left);
-      if (!(ow > 0) || !s.textContent.length || !(fs > 0)) continue;
-      const nextLeft = i + 1 < arr.length ? parseFloat(arr[i + 1].style.left) : Infinity;
-      const target = Math.min(ow, nextLeft - left, pageW - left) * 0.995;
-      if (!(target > 0)) continue;
-      ctx.font = `${fs}px ${fontFamily}`;
-      const natural = ctx.measureText(s.textContent).width;
-      if (natural > 0) {
-        const k = idxBySpan.get(s);
-        if (k != null) sx[k] = target / natural;
-      }
-    }
-  }
-  return sx;
-}
-
-function applyFitCache(root, sx) {
-  let i = 0;
-  for (const s of root.querySelectorAll("span.tl")) {
-    const v = sx[i++];
-    if (v != null) s.style.setProperty("--sx", String(v));
-  }
-}
-
-async function ensureFontReady(fontFamily) {
-  try {
-    if (document.fonts && typeof document.fonts.load === "function") {
-      await document.fonts.load(`20px ${fontFamily}`);
-    }
-  } catch {}
-}
-
-function pageSignature(page, pageIdx) {
-  const r = page.runs || [];
-  return `${pageIdx}:${page.width}:${page.height}:${r.length}:${r[0]?.t ?? ""}:${r[r.length - 1]?.t ?? ""}`;
+function hexToRgba(hex, alpha) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
+  if (!m) return `rgba(255,213,79,${alpha})`;
+  const n = parseInt(m[1], 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
 }
 
 const PageSurface = React.memo(function PageSurface({
@@ -127,54 +89,65 @@ const PageSurface = React.memo(function PageSurface({
   theme,
   renderWidth,
   highlights,
-  images = [],
+  pdfDoc,
   onSelectionCapture,
   register,
   active = true,
   virtualized = false,
 }) {
-  const rootRef = useRef(null);
+  const canvasRef = useRef(null);
   // renderWidth is the already-zoomed page box width, so the scale directly
   // maps PDF coords onto the box (text and box grow together — nothing clips).
   const scale = renderWidth / (page.width || 1);
-  const fontFamily = theme.font;
-  const color = theme.textColor;
-  const cacheKey = `${pageSignature(page, pageIdx)}|${fontFamily}|${renderWidth}`;
+  const filter = THEME_FILTERS[theme.themeId] || "none";
 
   // Precompute global char offsets per run (concatenation, matching backend).
   const runs = (page.runs || []);
   let acc = 0;
-  const annotated = runs.map((r) => {
-    const start = acc;
-    acc += r.t.length;
-    return { ...r, start, end: acc };
-  });
+  const annotated = useMemo(() => {
+    let a = 0;
+    return runs.map((r) => {
+      const start = a;
+      a += r.t.length;
+      return { ...r, start, end: a };
+    });
+  }, [runs]);
   const pageHighlights = highlights.get(pageIdx) || [];
   const inHighlight = (run) =>
     pageHighlights.some((h) => h.start < run.end && h.end > run.start);
 
-  useLayoutEffect(() => {
-    const el = rootRef.current;
-    if (!el) return;
-    if (!active) return;
-    const cached = fitCache.get(cacheKey);
-    if (cached) {
-      applyFitCache(el, cached);
-      return;
-    }
+  // Render the page canvas with pdf.js at the current scale. pdf.js pages are
+  // cached internally by getDocument(), so re-rendering on zoom only repaints
+  // the canvas. In-flight tasks are cancelled on scale change / unmount.
+  useEffect(() => {
+    if (!pdfDoc || !active) return;
     let cancelled = false;
+    let task = null;
     (async () => {
-      await ensureFontReady(fontFamily);
-      if (cancelled) return;
-      const sx = measureFit(el, fontFamily, renderWidth);
-      if (cancelled) return;
-      fitCache.set(cacheKey, sx);
-      applyFitCache(el, sx);
+      try {
+        const pdfPage = await pdfDoc.getPage(pageIdx + 1);
+        if (cancelled) return;
+        const viewport = pdfPage.getViewport({ scale });
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        canvas.width = Math.max(1, Math.ceil(viewport.width));
+        canvas.height = Math.max(1, Math.ceil(viewport.height));
+        if (cancelled) return;
+        task = pdfPage.render({ canvasContext: canvas.getContext("2d"), viewport });
+        await task.promise;
+      } catch {
+        // Rendering is best-effort; a failed page just shows the text layer.
+      }
     })();
     return () => {
       cancelled = true;
+      if (task) {
+        try {
+          task.cancel();
+        } catch {}
+      }
     };
-  }, [cacheKey, fontFamily, active, renderWidth]);
+  }, [pdfDoc, pageIdx, scale, active]);
 
   const handleSelection = () => {
     if (!onSelectionCapture) return;
@@ -203,17 +176,7 @@ const PageSurface = React.memo(function PageSurface({
     sel.removeAllRanges();
   };
 
-  // The page div must be tall enough for every run AND image, not just the
-  // aspect ratio, or descending text / figures get clipped (overflow hidden).
-  let contentBottom = 0;
-  for (const r of runs) {
-    contentBottom = Math.max(contentBottom, (r.y + r.fs) * scale);
-  }
-  for (const img of images) {
-    contentBottom = Math.max(contentBottom, (img.y + img.h) * scale);
-  }
   const aspectHeight = renderWidth * (page.height / page.width);
-  const pageHeight = Math.max(aspectHeight, contentBottom + 10);
 
   return (
     <div
@@ -223,7 +186,7 @@ const PageSurface = React.memo(function PageSurface({
       style={{
         position: "relative",
         width: renderWidth,
-        height: pageHeight,
+        height: aspectHeight,
         margin: "0 auto",
         background: theme.surface,
         boxShadow: "0 2px 14px rgba(63,56,39,0.14)",
@@ -231,28 +194,24 @@ const PageSurface = React.memo(function PageSurface({
         overflow: "hidden",
         userSelect: "text",
         contentVisibility: virtualized ? "auto" : undefined,
-        containIntrinsicSize: virtualized ? `${renderWidth}px ${pageHeight}px` : undefined,
+        containIntrinsicSize: virtualized ? `${renderWidth}px ${aspectHeight}px` : undefined,
       }}
       onMouseUp={handleSelection}
     >
-      {images.map((img, i) => (
-        <img
-          key={i}
-          src={img.url}
-          alt=""
-          draggable={false}
-          style={{
-            position: "absolute",
-            left: img.x * scale,
-            top: img.y * scale,
-            width: img.w * scale,
-            height: img.h * scale,
-            objectFit: "fill",
-            pointerEvents: "none",
-          }}
-        />
-      ))}
-      <div ref={rootRef} className="tl" style={{ position: "absolute", inset: 0, overflow: "hidden", lineHeight: 1 }}>
+      <canvas
+        ref={canvasRef}
+        style={{
+          position: "absolute",
+          inset: 0,
+          width: "100%",
+          height: "100%",
+          filter,
+          display: "block",
+        }}
+      />
+      {/* Transparent selectable text layer: colour matches the filtered page so
+          selection/highlight geometry sits exactly over the rendered glyphs. */}
+      <div className="tl" style={{ position: "absolute", inset: 0, overflow: "hidden", lineHeight: 1 }}>
         {annotated.map((r, i) => {
           const hl = inHighlight(r);
           return (
@@ -261,7 +220,6 @@ const PageSurface = React.memo(function PageSurface({
               className={`tl${hl ? " hl" : ""}`}
               data-start={r.start}
               data-end={r.end}
-              data-ow={r.w * scale}
               style={{
                 position: "absolute",
                 left: r.x * scale,
@@ -269,9 +227,7 @@ const PageSurface = React.memo(function PageSurface({
                 fontSize: r.fs * scale,
                 whiteSpace: "pre",
                 transformOrigin: "0 0",
-                transform: "scaleX(var(--sx, 1))",
-                fontFamily,
-                color,
+                color: "transparent",
                 fontWeight: (r.flags & 16) ? 700 : 400,
                 fontStyle: (r.flags & 2) ? "italic" : "normal",
                 background: hl ? hexToRgba(pageHighlights.find((h) => h.start < r.end && h.end > r.start).color, 0.45) : undefined,
@@ -299,15 +255,8 @@ const PageSurface = React.memo(function PageSurface({
   );
 });
 
-function hexToRgba(hex, alpha) {
-  const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
-  if (!m) return `rgba(255,213,79,${alpha})`;
-  const n = parseInt(m[1], 16);
-  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
-}
-
-// Scroll mode: a continuous vertical list of themed PDF-text pages.
-export function TextLayerScrollView({ pages, theme, highlights, imagesByPage, onPageVisible, pageRefs, onSelectionCapture }) {
+// Scroll mode: a continuous vertical list of themed PDF pages.
+export function TextLayerScrollView({ pages, theme, highlights, pdfDoc, pageRefs, onSelectionCapture }) {
   const inset = insetPx(theme);
   const zoom = theme.zoom;
   const containerRef = useRef(null);
@@ -335,8 +284,8 @@ export function TextLayerScrollView({ pages, theme, highlights, imagesByPage, on
     };
   }, []);
 
-  // Only fit text (the expensive measure pass) for pages near the viewport;
-  // offscreen pages skip layout entirely via content-visibility.
+  // Only render the pdf.js canvas for pages near the viewport; offscreen
+  // pages skip rendering entirely via content-visibility.
   useEffect(() => {
     const io = new IntersectionObserver(
       (entries) => {
@@ -366,16 +315,12 @@ export function TextLayerScrollView({ pages, theme, highlights, imagesByPage, on
 
   // Stable callback so React.memo on PageSurface actually prevents re-renders
   // of every page when an unrelated page updates (scroll position, progress).
-  const register = useCallback(
-    (el) => {
-      if (!el) return;
-      const idx = Number(el.dataset.page);
-      pageRefs.current[idx] = el;
-      ioRef.current?.observe(el);
-      onPageVisible?.(el, idx);
-    },
-    [pageRefs, ioRef, onPageVisible]
-  );
+  const register = useCallbackRef((el) => {
+    if (!el) return;
+    const idx = Number(el.dataset.page);
+    pageRefs.current[idx] = el;
+    ioRef.current?.observe(el);
+  });
 
   const renderWidth = Math.min(Math.max(availW - inset * 2, 280), SCROLL_MAX_WIDTH);
 
@@ -414,7 +359,7 @@ export function TextLayerScrollView({ pages, theme, highlights, imagesByPage, on
           theme={theme}
           renderWidth={boxWidthFor(page)}
           highlights={highlights}
-          images={imagesByPage?.get(idx) || []}
+          pdfDoc={pdfDoc}
           onSelectionCapture={onSelectionCapture}
           register={register}
           active={visible.has(idx)}
@@ -425,13 +370,19 @@ export function TextLayerScrollView({ pages, theme, highlights, imagesByPage, on
   );
 }
 
+function useCallbackRef(fn) {
+  const ref = useRef(fn);
+  ref.current = fn;
+  return useMemo(() => (el) => ref.current(el), []);
+}
+
 // Paginate mode: one page at a time (or a two-page spread), fit to the
 // viewport, page-turn navigation. Spread mode flips by 2 (paired spreads).
 export function TextLayerPaginateView({
   pages,
   theme,
   highlights,
-  imagesByPage,
+  pdfDoc,
   page,
   onPageChange,
   onSelectionCapture,
@@ -499,7 +450,7 @@ export function TextLayerPaginateView({
   };
 
   // Stable no-op so the memoized PageSurface keeps its identity across renders.
-  const noopRegister = useCallback(() => {}, []);
+  const noopRegister = useCallbackRef(() => {});
 
   useEffect(() => {
     const onKey = (e) => {
@@ -527,7 +478,7 @@ export function TextLayerPaginateView({
           theme={theme}
           renderWidth={renderWidth}
           highlights={highlights}
-          images={imagesByPage?.get(base) || []}
+          pdfDoc={pdfDoc}
           onSelectionCapture={onSelectionCapture}
           register={noopRegister}
         />
@@ -538,7 +489,7 @@ export function TextLayerPaginateView({
             theme={theme}
             renderWidth={renderWidth2}
             highlights={highlights}
-            images={imagesByPage?.get(base + 1) || []}
+            pdfDoc={pdfDoc}
             onSelectionCapture={onSelectionCapture}
             register={noopRegister}
           />

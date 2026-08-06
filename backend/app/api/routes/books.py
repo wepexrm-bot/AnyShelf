@@ -140,10 +140,9 @@ def process_extraction(book_id: str, local_pdf_path: str):
 
         # Capture plain values up front. After the commit the ORM attributes are
         # expired, and reading them lazily reloads from the DB -- the pipeline
-        # uploads images from worker threads while this same session is being
-        # used for progress commits, which SQLAlchemy forbids (concurrent
-        # operations on a provisioning connection).
-        owner_id = str(book.owner_id)
+        # runs on a separate thread while this same session is being used for
+        # progress commits, which SQLAlchemy forbids (concurrent operations on
+        # a provisioning connection).
         last_persisted_pct = 0
 
         def set_progress(fraction: float):
@@ -159,22 +158,14 @@ def process_extraction(book_id: str, local_pdf_path: str):
 
         set_progress(0.01)
 
-        def upload_page_image(data: bytes, ext: str) -> str:
-            import uuid as _uuid
-
-            key = f"images/{owner_id}/{book_id}/{_uuid.uuid4().hex}.{ext}"
-            upload_bytes(data, storage_key=key, content_type="image/jpeg" if ext == "jpg" else "image/png")
-            return key
-
         import time as _time
         _job_started = _time.perf_counter()
-        result = run_pipeline(local_pdf_path, progress_cb=set_progress, image_uploader=upload_page_image)
+        result = run_pipeline(local_pdf_path, progress_cb=set_progress)
         logger.info(
-            "Extraction finished for book %s in %.2fs: %d pages, images=%d",
+            "Extraction finished for book %s in %.2fs: %d pages",
             book_id,
             _time.perf_counter() - _job_started,
             len(result["pages"]),
-            sum(len(p.get("images", [])) for p in result["pages"]),
         )
         set_progress(1.0)
 
@@ -186,7 +177,6 @@ def process_extraction(book_id: str, local_pdf_path: str):
         )
 
         book.structured_text_key = structured_key
-        book.reflow_confidence = result["reflow_confidence"]
         book.is_scanned = result["is_scanned"]
         book.page_count = len(result["pages"])
         book.extraction_status = "done"
@@ -265,7 +255,6 @@ def list_books(user: User = Depends(get_current_user), db: Session = Depends(get
             "genre": b.genre,
             "cover_url": get_presigned_url(b.cover_key) if b.cover_key else None,
             "extraction_status": b.extraction_status,
-            "reflow_confidence": b.reflow_confidence,
             "is_scanned": b.is_scanned,
             "created_at": b.created_at.isoformat() if b.created_at else None,
         }
@@ -371,7 +360,7 @@ def re_extract_book(
     """Re-run extraction for a book whose stored JSON predates the text-layer
     engine (legacy reflow format, no ``runs``). Downloads the original PDF
     from object storage and processes it into ``textlayer-v1`` in the
-    background, replacing the stored JSON and confidence columns. The caller
+    background, replacing the stored JSON and coverage columns. The caller
     can watch ``GET /books/{id}/progress`` while it runs."""
     book = db.query(Book).filter(Book.id == book_id).first()
     if not book:
@@ -388,52 +377,6 @@ def re_extract_book(
     background_tasks.add_task(process_extraction, book.id, tmp_path)
 
     return {"id": book.id, "status": "processing", "extraction_status": "processing"}
-
-
-@router.get("/{book_id}/images")
-def get_book_images(book_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Per-page placed images with fresh presigned URLs, for the web reader.
-
-    Image storage keys live in the structured text JSON (``pages[].images[]``);
-    they are not directly usable as browser URLs, so the reader asks for them
-    here instead of embedding long-lived URLs in the cached JSON."""
-    book = db.query(Book).filter(Book.id == book_id).first()
-    if not book:
-        raise HTTPException(status_code=404, detail="Book not found")
-    if book.owner_id != user.id:
-        raise HTTPException(status_code=403, detail="Not your book")
-    if not book.structured_text_key:
-        return {"pages": []}
-
-    try:
-        raw = download_bytes(book.structured_text_key)
-    except Exception as exc:
-        logger.warning("Could not read structured text for book %s: %s", book_id, exc)
-        return {"pages": []}
-
-    try:
-        data = json.loads(raw)
-    except Exception:
-        return {"pages": []}
-
-    pages = []
-    for p in data.get("pages", []):
-        images = []
-        for img in p.get("images", []):
-            key = img.get("key")
-            if not key:
-                continue
-            images.append(
-                {
-                    "x": img.get("x"),
-                    "y": img.get("y"),
-                    "w": img.get("w"),
-                    "h": img.get("h"),
-                    "url": get_presigned_url(key, inline=True),
-                }
-            )
-        pages.append({"page": p.get("page"), "images": images})
-    return {"pages": pages}
 
 
 class BookUpdate(BaseModel):
@@ -526,7 +469,6 @@ def get_book(book_id: str, db: Session = Depends(get_db)):
         "genre": book.genre,
         "cover_url": get_presigned_url(book.cover_key) if book.cover_key else None,
         "extraction_status": book.extraction_status,
-        "reflow_confidence": book.reflow_confidence,
         "is_scanned": book.is_scanned,
         "pdf_url": get_presigned_url(book.storage_key, inline=True),
         "structured_text_url": get_presigned_url(book.structured_text_key) if book.structured_text_key else None,

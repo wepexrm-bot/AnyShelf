@@ -30,21 +30,6 @@ def two_page_pdf(tmp_path):
     return str(path)
 
 
-@pytest.fixture
-def image_pdf(tmp_path):
-    """A page with real text and one embedded raster image."""
-    path = tmp_path / "illustrated.pdf"
-    doc = fitz.open()
-    page = doc.new_page(width=612, height=792)
-    page.insert_text((72, 96), "Caption text", fontsize=12)
-    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 120, 80), False)
-    pix.clear_with(0)  # solid black
-    page.insert_image(fitz.Rect(200, 300, 320, 380), pixmap=pix)
-    doc.save(path)
-    doc.close()
-    return str(path)
-
-
 # ---------------------------------------------------------------------------
 # Positioned-run extraction
 # ---------------------------------------------------------------------------
@@ -75,84 +60,6 @@ def test_extract_text_runs_physical_pages_and_run_geometry(two_page_pdf):
         assert r.advance > 0
         assert r.font
         assert r.page_index == 0
-
-
-def test_extract_page_images_finds_embedded_raster(image_pdf):
-    pages = extract_text_runs(image_pdf)
-
-    assert len(pages) == 1
-    page = pages[0]
-    assert page.width == 612.0 and page.height == 792.0
-
-    assert len(page.images) == 1
-    img = page.images[0]
-    # Placed at Rect(200, 300, 320, 380) unrotated; rotation 0 -> identity.
-    assert img.x0 == pytest.approx(200.0, abs=0.1)
-    assert img.y0 == pytest.approx(300.0, abs=0.1)
-    assert img.x1 == pytest.approx(320.0, abs=0.1)
-    assert img.y1 == pytest.approx(380.0, abs=0.1)
-    assert img.data, "image bytes must be extracted"
-    assert img.ext in ("png", "jpg")
-
-    # Decode the stored bytes back into an image with the same aspect ratio
-    # (JPEG encoding may round dimensions down to DCT block multiples).
-    with fitz.open(stream=img.data, filetype=img.ext) as imgsrc:
-        pix = imgsrc[0].get_pixmap()
-        assert pix.width / pix.height == pytest.approx(120 / 80, rel=0.05)
-
-
-def test_pipeline_emits_images_when_uploader_passed(image_pdf):
-    uploaded = []
-
-    def fake_uploader(data: bytes, ext: str) -> str:
-        uploaded.append(ext)
-        return f"images/owner/{len(uploaded)}.{ext}"
-
-    result = run_pipeline(image_pdf, image_uploader=fake_uploader)
-
-    assert len(result["pages"]) == 1
-    page = result["pages"][0]
-    assert len(page["images"]) == 1
-    img = page["images"][0]
-    assert img["key"].startswith("images/owner/")
-    assert img["x"] == pytest.approx(200.0, abs=0.1)
-    assert img["y"] == pytest.approx(300.0, abs=0.1)
-    assert img["w"] == pytest.approx(120.0, abs=0.1)
-    assert img["h"] == pytest.approx(80.0, abs=0.1)
-    assert uploaded == [img["key"].rsplit(".", 1)[1]]
-
-
-def test_pipeline_uploads_keep_image_order_under_concurrency(tmp_path):
-    """Parallel uploads must land back in the original page/image order."""
-    path = tmp_path / "multi.pdf"
-    doc = fitz.open()
-    for page_idx in range(2):
-        page = doc.new_page(width=612, height=792)
-        page.insert_text((72, 96), f"Page {page_idx} caption", fontsize=12)
-        pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 60, 40), False)
-        pix.clear_with(page_idx + 1)
-        page.insert_image(fitz.Rect(200, 300, 260, 340), pixmap=pix)
-    doc.save(path)
-    doc.close()
-
-    calls = []
-
-    def fake_uploader(data: bytes, ext: str) -> str:
-        calls.append(len(calls))
-        return f"images/owner/{len(calls)}.{ext}"
-
-    result = run_pipeline(str(path), image_uploader=fake_uploader)
-
-    keys = [img["key"] for p in result["pages"] for img in p["images"]]
-    assert len(keys) == 2
-    # Keys were assigned in call order, which must match image order.
-    assert keys == ["images/owner/1.png", "images/owner/2.png"]
-
-
-def test_pipeline_omits_image_keys_without_uploader(image_pdf):
-    result = run_pipeline(image_pdf)
-    assert len(result["pages"][0]["images"]) == 1
-    assert result["pages"][0]["images"][0]["key"] is None
 
 
 def test_two_up_spread_is_not_split(tmp_path):
@@ -278,11 +185,10 @@ def test_pipeline_schema_and_coverage(two_page_pdf):
     assert result["schema"] == "textlayer-v1"
     assert result["outline"] == [{"level": 1, "title": "Chapter One", "page": 0}]
     assert result["text_confidence"] == 0.5  # 1 of 2 pages has text
-    assert result["reflow_confidence"] == 0.5
-    # At exactly 50% coverage the book is still "half text" -> not a scan, and
-    # the text layer is recommended.
+    assert "reflow_confidence" not in result
+    assert "reflow_mode_recommended" not in result
+    # At exactly 50% coverage the book is still "half text" -> not a scan.
     assert result["is_scanned"] is False
-    assert result["reflow_mode_recommended"] is True
 
     assert len(result["pages"]) == 2
     p0 = result["pages"][0]
@@ -290,6 +196,8 @@ def test_pipeline_schema_and_coverage(two_page_pdf):
     assert any("David Copperfield" in r["t"] for r in p0["runs"])
     for r in p0["runs"]:
         assert set(("t", "x", "y", "fs", "w", "f", "flags")) <= set(r.keys())
+    # Page images are no longer extracted; clients render the PDF itself.
+    assert "images" not in p0
 
 
 def test_pipeline_ocr_fallback_fills_blank_page(two_page_pdf):

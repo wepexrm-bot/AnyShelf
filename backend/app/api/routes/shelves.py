@@ -85,7 +85,6 @@ def get_shelf(shelf_id: str, user: User = Depends(get_current_user), db: Session
                 "id": b.id,
                 "title": b.title,
                 "extraction_status": b.extraction_status,
-                "reflow_confidence": b.reflow_confidence,
             }
             for b in shelf.books
         ],

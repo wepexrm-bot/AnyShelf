@@ -27,23 +27,6 @@ class TextRun:
 
 
 @dataclass
-class PageImage:
-    """A raster image (cover art, illustration, photo) placed on a page.
-
-    ``bbox`` is in display space (rotation applied). The encoded bytes are kept
-    here so the pipeline can upload them to object storage; callers store the
-    resulting key alongside the geometry in the text-layer JSON."""
-
-    x0: float
-    y0: float
-    x1: float
-    y1: float
-    data: bytes
-    content_type: str
-    ext: str = "png"  # filename extension derived from the content type
-
-
-@dataclass
 class PageExtraction:
     page_index: int
     runs: list[TextRun]
@@ -54,8 +37,6 @@ class PageExtraction:
     # Native PDF annotations (highlights, underlines, margin notes) found on
     # this page, in display-space coordinates.
     native_annotations: list["NativeAnnotation"] = field(default_factory=list)
-    # Raster images placed on this page, in display-space coordinates.
-    images: list[PageImage] = field(default_factory=list)
 
     def __post_init__(self):
         for r in self.runs:
@@ -130,52 +111,6 @@ _HIGHLIGHT_ANNOTS = {
     fitz.PDF_ANNOT_STRIKE_OUT,
     fitz.PDF_ANNOT_SQUIGGLY,
 }
-
-# Images smaller than this (in display points) are decorative noise (icons,
-# inline bullets, textures) and are dropped -- they'd bloat the storage /
-# JSON without being meaningful page content.
-_MIN_IMAGE_DIM = 24.0
-
-
-def _extract_page_images(page: fitz.Page, width: float, height: float, rotation: int) -> list[PageImage]:
-    """Pull placed raster images off a page.
-
-    Uses PyMuPDF's image info (which reports bboxes in *unrotated* page
-    space) plus per-xref extraction to get the encoded bytes. The bbox is
-    transformed into display space to match the text runs. Duplicate image
-    xrefs placed multiple times each get their own entry (a logo repeated in
-    a header/footer still has a placement box)."""
-    images: list[PageImage] = []
-    for info in page.get_image_info(xrefs=True):
-        bbox = info.get("bbox")
-        xref = info.get("xref")
-        if not bbox or not xref:
-            continue
-        if xref <= 0:
-            continue
-        x0, y0, x1, y1 = _rotate_rect(fitz.Rect(bbox), width, height, rotation)
-        if x1 - x0 < _MIN_IMAGE_DIM or y1 - y0 < _MIN_IMAGE_DIM:
-            continue
-        try:
-            extracted = page.parent.extract_image(xref)
-        except Exception:
-            continue
-        if not extracted or not extracted.get("image"):
-            continue
-        content_type = extracted.get("ext") or "png"
-        ext = "png" if content_type == "png" else "jpg"
-        images.append(
-            PageImage(
-                x0=x0,
-                y0=y0,
-                x1=x1,
-                y1=y1,
-                data=extracted["image"],
-                content_type=f"image/{content_type}",
-                ext=ext,
-            )
-        )
-    return images
 
 
 def _extract_native_annotations(page: fitz.Page, width: float, height: float, rotation: int) -> list[NativeAnnotation]:
@@ -265,7 +200,6 @@ def extract_text_runs(pdf_path: str, progress_cb=None, doc: fitz.Document | None
                     height=disp_h,
                     rotation=rotation,
                     native_annotations=_extract_native_annotations(page, base_w, base_h, rotation),
-                    images=_extract_page_images(page, base_w, base_h, rotation),
                 )
             )
 

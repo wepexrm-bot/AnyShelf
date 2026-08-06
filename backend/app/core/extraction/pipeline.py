@@ -11,7 +11,6 @@ items so clients can render the PDF's native text layer faithfully.
 import json
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 import fitz
 
@@ -19,19 +18,12 @@ from app.config import settings
 
 logger = logging.getLogger("cloudread.pipeline")
 
-_IMAGE_UPLOAD_WORKERS = 4
 
-
-def run_pipeline(pdf_path: str, progress_cb=None, image_uploader=None) -> dict:
+def run_pipeline(pdf_path: str, progress_cb=None) -> dict:
     """Run the full text-layer pipeline.
 
     ``progress_cb`` (if given) is called with a fraction (0.0-1.0) at each
     stage so callers can surface live 0-100% progress to the user.
-
-    ``image_uploader`` (if given) is a ``callable(data: bytes, ext: str) ->
-    storage_key`` used to persist each page image to object storage. When
-    absent, images are extracted but not persisted and pages carry an empty
-    ``images`` list (used by tests / callers that only need text).
     """
 
     from app.core.extraction.extractor import extract_text_runs, get_pdf_outline
@@ -90,9 +82,7 @@ def run_pipeline(pdf_path: str, progress_cb=None, image_uploader=None) -> dict:
             "schema": "textlayer-v1",
             "outline": outline,
             "text_confidence": coverage,
-            "reflow_confidence": coverage,
             "is_scanned": coverage < 0.5,
-            "reflow_mode_recommended": coverage >= 0.5,
             "imported_annotations": imported_annotations,
             "pages": [
                 {
@@ -112,57 +102,21 @@ def run_pipeline(pdf_path: str, progress_cb=None, image_uploader=None) -> dict:
                         }
                         for r in p.runs
                     ],
-                    "images": [
-                        {
-                            "x": round(img.x0, 2),
-                            "y": round(img.y0, 2),
-                            "w": round(img.x1 - img.x0, 2),
-                            "h": round(img.y1 - img.y0, 2),
-                            "key": None,
-                        }
-                        for img in p.images
-                    ],
                 }
                 for p in pages
             ],
         }
-
-        if image_uploader:
-            _upload_page_images(result["pages"], pages, image_uploader)
-            t = stage_done("image_uploads", t)
     finally:
         doc.close()
 
     logger.info(
-        "pipeline complete: %d pages, %d runs, %d images, coverage=%.2f, total %.2fs",
+        "pipeline complete: %d pages, %d runs, coverage=%.2f, total %.2fs",
         len(pages),
         sum(len(p.runs) for p in pages),
-        sum(len(p.images) for p in pages),
         coverage,
         time.perf_counter() - started,
     )
     return result
-
-
-def _upload_page_images(page_dicts: list[dict], pages, image_uploader) -> None:
-    """Upload every page image through a small thread pool, preserving order.
-
-    ``pages[].images[].key`` entries are filled in place so callers see the
-    same output whether uploads run serially or in parallel.
-    """
-    jobs = [
-        (img_dict, img)
-        for page_dict, page in zip(page_dicts, pages)
-        for img_dict, img in zip(page_dict["images"], page.images)
-    ]
-    if not jobs:
-        return
-
-    with ThreadPoolExecutor(max_workers=_IMAGE_UPLOAD_WORKERS) as executor:
-        results = executor.map(lambda job: image_uploader(job[1].data, job[1].ext), jobs)
-
-    for (img_dict, _img), key in zip(jobs, results):
-        img_dict["key"] = key
 
 
 def run_pipeline_to_json(pdf_path: str) -> str:

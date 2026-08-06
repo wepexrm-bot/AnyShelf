@@ -77,7 +77,6 @@ class Book(Base):
         default="pending",
     )
     extraction_progress = Column(Integer, default=0)  # 0-100, durable across restarts
-    reflow_confidence = Column(Float, nullable=True)  # 0.0-1.0 text-layer coverage
     is_scanned = Column(Boolean, default=False)
     page_count = Column(Float, nullable=True)
 
