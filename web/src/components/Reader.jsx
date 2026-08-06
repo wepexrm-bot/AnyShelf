@@ -125,6 +125,17 @@ export default function Reader() {
   const [jumpValue, setJumpValue] = useState("1");
   const [jumpFocused, setJumpFocused] = useState(false);
   const [chromeVisible, setChromeVisible] = useState(true);
+  const [reloadToken, setReloadToken] = useState(0);
+
+  const handleReExtract = async () => {
+    try {
+      setExtraction({ status: "processing", progress: 0 });
+      await api(`/books/${bookId}/re-extract`, { method: "POST" });
+      setReloadToken((t) => t + 1);
+    } catch (err) {
+      setExtraction(null);
+    }
+  };
 
   const highlights = useMemo(
     () => (layoutPages?.length ? resolveHighlights(annotations, layoutPages) : new Map()),
@@ -392,7 +403,7 @@ export default function Reader() {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [bookId]);
+  }, [bookId, reloadToken]);
 
   // Track scroll depth -> reading progress + current page (scroll mode)
   useEffect(() => {
@@ -606,6 +617,13 @@ export default function Reader() {
         <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
           <button className="btn-icon" onClick={() => navigate(backTo)} title="Back to library">
             <span className="icon" style={{ fontSize: 22 }}>arrow_back</span>
+          </button>
+          <button
+            className="btn-icon"
+            onClick={handleReExtract}
+            title="Re-extract this book (regenerate text and layout)"
+          >
+            <span className="icon" style={{ fontSize: 22 }}>refresh</span>
           </button>
         </div>
 
