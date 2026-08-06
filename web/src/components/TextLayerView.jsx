@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { pageHasImages } from "../pdfjs";
 
 // Rendering for the backend text-layer JSON (schema `textlayer-v1`): each PDF
@@ -86,14 +86,37 @@ function hexToRgba(hex, alpha) {
 
 // Text mode substitutes the chosen webfont for the PDF's own fonts. To keep the
 // re-laid-out text within the page box we fit each line with scaleX, exactly like
-// the lab reader. Widths are measured with a 2D canvas `measureText` (viewport
-// independent) rather than the DOM, because offscreen pages are virtualized with
-// `content-visibility: auto` and would not have laid-out metrics to read.
-let measureCtx = null;
-function measureTextWidth(text, font) {
-  if (!measureCtx) measureCtx = document.createElement("canvas").getContext("2d");
-  measureCtx.font = font;
-  return measureCtx.measureText(text).width;
+// the lab reader. Widths are measured with an offscreen laid-out span rather than
+// a 2D canvas `measureText`: the canvas caches the metrics it resolves for a font
+// string the first time it is used — often while the webfont is still loading —
+// and never re-resolves once the font loads, so the fit would be computed from
+// fallback widths while the DOM renders the (wider) real font, letting the scaled
+// text overflow the page box. A real laid-out span always reflects the currently
+// loaded font, and it works even for virtualized pages because the measuring
+// layer itself is never wrapped in `content-visibility`.
+let measureLayer = null;
+function measureTextWidth(text, fontFamily, fontSize, weight, style) {
+  if (!measureLayer) {
+    measureLayer = document.createElement("div");
+    Object.assign(measureLayer.style, {
+      position: "absolute",
+      left: "-99999px",
+      top: 0,
+      width: "max-content",
+      pointerEvents: "none",
+      visibility: "hidden",
+      lineHeight: 1,
+      whiteSpace: "pre",
+    });
+    (document.body || document.documentElement).appendChild(measureLayer);
+  }
+  const span = document.createElement("span");
+  span.style.cssText = `font-family:${fontFamily};font-size:${fontSize}px;font-weight:${weight};font-style:${style};white-space:pre;`;
+  span.textContent = text;
+  measureLayer.appendChild(span);
+  const width = span.getBoundingClientRect().width;
+  measureLayer.removeChild(span);
+  return width;
 }
 
 function runFont(r, scale, theme) {
@@ -102,10 +125,11 @@ function runFont(r, scale, theme) {
   return `${style}${weight} ${Math.max(1, r.fs * scale)}px ${theme.font}`;
 }
 
-// Per-line scaleX fit, replicating the lab's applyTextScaling: each run is
+// Per-line fit target, replicating the lab's applyTextScaling: each run is
 // squashed to fit its original slot (its own width, the gap to the next run on
-// the line, or the page edge), whichever is smallest.
-function lineScaleX(annotated, scale, renderWidth, theme) {
+// the line, or the page edge), whichever is smallest. Returns a map from run
+// start char -> target width in rendered px.
+function lineTargets(annotated, scale, renderWidth) {
   const pageW = renderWidth;
   const lines = new Map();
   for (const r of annotated) {
@@ -123,10 +147,7 @@ function lineScaleX(annotated, scale, renderWidth, theme) {
       if (!(ow > 0)) continue;
       const nextLeft = i + 1 < arr.length ? arr[i + 1].x * scale : Infinity;
       const target = Math.min(ow, nextLeft - left, pageW - left) * 0.995;
-      if (!(target > 0)) continue;
-      const measured = measureTextWidth(r.t, runFont(r, scale, theme));
-      if (!(measured > 0)) continue;
-      out.set(r.start, target / measured);
+      if (target > 0) out.set(r.start, target);
     }
   }
   return out;
@@ -151,6 +172,7 @@ const PageSurface = React.memo(function PageSurface({
   virtualized = false,
 }) {
   const canvasRef = useRef(null);
+  const spanRefs = useRef([]);
   const [fontTick, setFontTick] = useState(0);
   const [pageHasImage, setPageHasImage] = useState(false);
   // renderWidth is the already-zoomed page box width, so the scale directly
@@ -242,10 +264,79 @@ const PageSurface = React.memo(function PageSurface({
     };
   }, [effectiveTextMode, scale, theme.font, annotated]);
 
-  const scaleXByRun = useMemo(
-    () => (effectiveTextMode ? lineScaleX(annotated, scale, renderWidth, theme) : new Map()),
-    [effectiveTextMode, annotated, scale, renderWidth, theme, fontTick]
+  const fitTargets = useMemo(
+    () => (effectiveTextMode && active ? lineTargets(annotated, scale, renderWidth) : new Map()),
+    [effectiveTextMode, active, annotated, scale, renderWidth]
   );
+
+  // Pre-layout estimate: measured with an offscreen laid-out span at the
+  // currently-active font. Used only until the real post-layout pass below has
+  // run (and as a first-paint approximation for offscreen pages).
+  const scaleXByRun = useMemo(
+    () => {
+      if (!effectiveTextMode || !active) return new Map();
+      const out = new Map();
+      for (const r of annotated) {
+        const target = fitTargets.get(r.start);
+        if (!(target > 0)) continue;
+        const measured = measureTextWidth(
+          r.t,
+          theme.font,
+          r.fs * scale,
+          r.flags & 16 ? 700 : 400,
+          r.flags & 2 ? "italic" : "normal"
+        );
+        if (!(measured > 0)) continue;
+        out.set(r.start, target / measured);
+      }
+      return out;
+    },
+    [effectiveTextMode, active, fitTargets, annotated, scale, theme.font, fontTick]
+  );
+
+  // Post-layout correction: after the webfont has actually activated in the
+  // rendered spans, measure each span's real laid-out width and set scaleX so
+  // it lands exactly on the target. This is the sweep2 fix — the pre-layout
+  // estimate can be wrong when the font swaps in after the render, but the
+  // real span always reflects the currently-loaded font. Bumping fontTick
+  // re-applies it (both on initial font load and on a later font-family change).
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  useLayoutEffect(() => {
+    if (!effectiveTextMode || !active) return;
+    let cancelled = false;
+    let raf = 0;
+    const apply = () => {
+      if (cancelled || !activeRef.current) return;
+      let pending = false;
+      for (let i = 0; i < annotated.length; i++) {
+        const el = spanRefs.current[i];
+        if (!el) continue;
+        const r = annotated[i];
+        const target = fitTargets.get(r.start);
+        if (!(target > 0)) continue;
+        const w = el.offsetWidth;
+        if (!(w > 0)) {
+          // Layout may be skipped for offscreen virtualized pages; retry on
+          // the next frame once the browser actually lays the page out.
+          pending = true;
+          continue;
+        }
+        const k = target / w;
+        if (Math.abs(k - 1) < 0.0001) el.style.transform = "";
+        else el.style.transform = `scaleX(${k})`;
+      }
+      if (pending) raf = requestAnimationFrame(apply);
+    };
+    apply();
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(apply);
+    }
+    return () => {
+      cancelled = true;
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, [effectiveTextMode, active, fitTargets, annotated, scale, theme.font, fontTick]);
 
   // Render the page canvas with pdf.js at the current scale. pdf.js pages are
   // cached internally by getDocument(), so re-rendering on zoom only repaints
@@ -319,7 +410,7 @@ const PageSurface = React.memo(function PageSurface({
         width: renderWidth,
         height: aspectHeight,
         margin: "0 auto",
-        background: effectiveTextMode ? theme.background : theme.surface,
+        background: textMode ? theme.background : theme.surface,
         boxShadow: "0 2px 14px rgba(63,56,39,0.14)",
         borderRadius: 6,
         overflow: "hidden",
@@ -349,6 +440,9 @@ const PageSurface = React.memo(function PageSurface({
           return (
             <span
               key={i}
+              ref={(el) => {
+                spanRefs.current[i] = el;
+              }}
               className={`tl${hl ? " hl" : ""}`}
               data-start={r.start}
               data-end={r.end}
@@ -420,6 +514,7 @@ export function TextLayerScrollView({ pages, theme, highlights, pdfDoc, pageRefs
 
   // Only render the pdf.js canvas for pages near the viewport; offscreen
   // pages skip rendering entirely via content-visibility.
+  const pendingObserveRef = useRef([]);
   useEffect(() => {
     const io = new IntersectionObserver(
       (entries) => {
@@ -444,6 +539,12 @@ export function TextLayerScrollView({ pages, theme, highlights, pdfDoc, pageRefs
       { rootMargin: "800px 0px" }
     );
     ioRef.current = io;
+    // Elements registered during the first commit are observed here, because
+    // ref callbacks run before this effect and the observer did not exist yet.
+    for (const el of pendingObserveRef.current) {
+      io.observe(el);
+    }
+    pendingObserveRef.current = [];
     return () => io.disconnect();
   }, []);
 
@@ -453,7 +554,8 @@ export function TextLayerScrollView({ pages, theme, highlights, pdfDoc, pageRefs
     if (!el) return;
     const idx = Number(el.dataset.page);
     pageRefs.current[idx] = el;
-    ioRef.current?.observe(el);
+    if (ioRef.current) ioRef.current.observe(el);
+    else pendingObserveRef.current.push(el);
   });
 
   const renderWidth = Math.min(Math.max(availW - inset * 2, 280), SCROLL_MAX_WIDTH);
