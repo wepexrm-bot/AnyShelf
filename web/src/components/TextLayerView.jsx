@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { pageHasImages } from "../pdfjs";
 
 // Rendering for the backend text-layer JSON (schema `textlayer-v1`): each PDF
 // page is rendered faithfully with pdf.js (so images, vector art, backgrounds
@@ -131,6 +132,12 @@ function lineScaleX(annotated, scale, renderWidth, theme) {
   return out;
 }
 
+// Session cache of which pages contain embedded images, keyed by the loaded
+// PDF document. Detection runs once per page (gated to visible pages) so text
+// mode can keep the themed canvas on illustrated pages and never hide covers.
+// A WeakMap lets pdf.js drop the cache when a document is closed.
+const imagePageCache = new WeakMap();
+
 const PageSurface = React.memo(function PageSurface({
   page,
   pageIdx,
@@ -145,6 +152,7 @@ const PageSurface = React.memo(function PageSurface({
 }) {
   const canvasRef = useRef(null);
   const [fontTick, setFontTick] = useState(0);
+  const [pageHasImage, setPageHasImage] = useState(false);
   // renderWidth is the already-zoomed page box width, so the scale directly
   // maps PDF coords onto the box (text and box grow together — nothing clips).
   const scale = renderWidth / (page.width || 1);
@@ -167,15 +175,56 @@ const PageSurface = React.memo(function PageSurface({
 
   const hasText = runs.length > 0;
   const textMode = !!theme.textMode && hasText;
-  // Scanned pages (no runs) always show the PDF canvas so text mode never blanks
-  // them out — same gating as the lab reader's `.hastext`.
-  const canvasVisible = !textMode;
+
+  // Detect whether this page draws any embedded image. Done lazily while the
+  // page is near the viewport, cached for the session, so covers/illustrated
+  // pages can keep the themed canvas in text mode (font substitution only on
+  // text-only pages). Scanned pages (no runs) always show the canvas anyway.
+  useEffect(() => {
+    if (!textMode || !pdfDoc || !active) return;
+    let cancelled = false;
+    const finish = (has) => {
+      if (!cancelled) setPageHasImage(has);
+    };
+    let entry = imagePageCache.get(pdfDoc);
+    if (!entry) {
+      entry = { checked: new Set(), images: new Set(), pending: new Set() };
+      imagePageCache.set(pdfDoc, entry);
+    }
+    if (entry.checked.has(pageIdx)) {
+      finish(entry.images.has(pageIdx));
+      return;
+    }
+    if (entry.pending.has(pageIdx)) return;
+    entry.pending.add(pageIdx);
+    (async () => {
+      let has = false;
+      try {
+        const p = await pdfDoc.getPage(pageIdx + 1);
+        has = await pageHasImages(p);
+      } catch {}
+      entry.checked.add(pageIdx);
+      entry.pending.delete(pageIdx);
+      if (has) entry.images.add(pageIdx);
+      if (!cancelled) finish(has);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [textMode, pdfDoc, pageIdx, active]);
+
+  // A page that has an image (e.g. a cover with a title) keeps the themed PDF
+  // canvas instead of substituting fonts, so illustrations are never lost.
+  const effectiveTextMode = textMode && !pageHasImage;
+  // Scanned pages (no runs) always show the PDF canvas so text mode never
+  // blanks them out — same gating as the lab reader's `.hastext`.
+  const canvasVisible = !effectiveTextMode;
 
   // Text mode: once the chosen webfont is loaded, compute the per-line scaleX
   // fit. Bumping fontTick re-runs the memo so widths are measured with the real
   // font (handles both initial load and a later Font Family change).
   useEffect(() => {
-    if (!textMode) return;
+    if (!effectiveTextMode) return;
     let cancelled = false;
     const load = async () => {
       try {
@@ -191,11 +240,11 @@ const PageSurface = React.memo(function PageSurface({
     return () => {
       cancelled = true;
     };
-  }, [textMode, scale, theme.font, annotated]);
+  }, [effectiveTextMode, scale, theme.font, annotated]);
 
   const scaleXByRun = useMemo(
-    () => (textMode ? lineScaleX(annotated, scale, renderWidth, theme) : new Map()),
-    [textMode, annotated, scale, renderWidth, theme, fontTick]
+    () => (effectiveTextMode ? lineScaleX(annotated, scale, renderWidth, theme) : new Map()),
+    [effectiveTextMode, annotated, scale, renderWidth, theme, fontTick]
   );
 
   // Render the page canvas with pdf.js at the current scale. pdf.js pages are
@@ -270,7 +319,7 @@ const PageSurface = React.memo(function PageSurface({
         width: renderWidth,
         height: aspectHeight,
         margin: "0 auto",
-        background: textMode ? theme.background : theme.surface,
+        background: effectiveTextMode ? theme.background : theme.surface,
         boxShadow: "0 2px 14px rgba(63,56,39,0.14)",
         borderRadius: 6,
         overflow: "hidden",
@@ -310,9 +359,9 @@ const PageSurface = React.memo(function PageSurface({
                 fontSize: r.fs * scale,
                 whiteSpace: "pre",
                 transformOrigin: "0 0",
-                transform: textMode && scaleXByRun.has(r.start) ? `scaleX(${scaleXByRun.get(r.start)})` : undefined,
-                color: textMode ? theme.textColor : "transparent",
-                fontFamily: textMode ? theme.font : undefined,
+                transform: effectiveTextMode && scaleXByRun.has(r.start) ? `scaleX(${scaleXByRun.get(r.start)})` : undefined,
+                color: effectiveTextMode ? theme.textColor : "transparent",
+                fontFamily: effectiveTextMode ? theme.font : undefined,
                 fontWeight: (r.flags & 16) ? 700 : 400,
                 fontStyle: (r.flags & 2) ? "italic" : "normal",
                 background: hl ? hexToRgba(pageHighlights.find((h) => h.start < r.end && h.end > r.start).color, 0.45) : undefined,
