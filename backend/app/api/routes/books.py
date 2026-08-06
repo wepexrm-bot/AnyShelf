@@ -138,13 +138,23 @@ def process_extraction(book_id: str, local_pdf_path: str):
         book.extraction_progress = 0
         db.commit()
 
+        # Capture plain values up front. After the commit the ORM attributes are
+        # expired, and reading them lazily reloads from the DB -- the pipeline
+        # uploads images from worker threads while this same session is being
+        # used for progress commits, which SQLAlchemy forbids (concurrent
+        # operations on a provisioning connection).
+        owner_id = str(book.owner_id)
+        last_persisted_pct = 0
+
         def set_progress(fraction: float):
+            nonlocal last_persisted_pct
             pct = int(round(fraction * 100))
             _extraction_progress[book_id] = pct
             # Persist every integer-percent change so progress survives a
             # process recycle (Render free tier can sleep/restart mid-job).
-            if book.extraction_progress != pct:
+            if pct != last_persisted_pct:
                 book.extraction_progress = pct
+                last_persisted_pct = pct
                 db.commit()
 
         set_progress(0.01)
@@ -152,7 +162,7 @@ def process_extraction(book_id: str, local_pdf_path: str):
         def upload_page_image(data: bytes, ext: str) -> str:
             import uuid as _uuid
 
-            key = f"images/{book.owner_id}/{book_id}/{_uuid.uuid4().hex}.{ext}"
+            key = f"images/{owner_id}/{book_id}/{_uuid.uuid4().hex}.{ext}"
             upload_bytes(data, storage_key=key, content_type="image/jpeg" if ext == "jpg" else "image/png")
             return key
 
