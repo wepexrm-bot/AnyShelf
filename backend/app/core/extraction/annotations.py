@@ -1,17 +1,17 @@
 """Step 4a of the pipeline (optional): import native PDF annotations.
 
 A highlight or margin note in the PDF lives at a fixed rectangle on a fixed
-page. Reflow abandons fixed coordinates, so we bridge the two worlds here:
+page. The text layer keeps the same coordinates, so we anchor imported
+annotations by *character range* within the page's reading-order run stream:
 
-1. Two-up spread pages get split into logical pages in extractor.extract_spans;
-   each logical page already carries the raw annotation rectangles that fall
-   on it (NativeAnnotation).
-2. For each annotation we find which TextSpans its rectangle overlaps -- that
-   overlap is the highlighted text itself, found via layout, in reading order.
-3. We anchor the annotation by *text content*, not coordinates: the matched
-   text plus a few words of surrounding context. Substring-searching that text
-   inside the reflowed paragraphs later locates it regardless of pagination,
-   font size, or re-extraction shifting character offsets.
+1. Each run already carries its baseline, font height and advance width, so we
+   can reconstruct its bounding box and test overlap against the annotation
+   rectangle.
+2. Runs are in reading order; the annotation's char range is the span from the
+   first overlapped run's start to the last overlapped run's end.
+3. We also keep the matched text plus a few words of surrounding context, so
+   annotations survive re-extraction and can be found by text search too (a
+   fallback the mobile/web readers use for older, text-anchored rows).
 
 The result is a list of dicts describing imported annotations; the caller
 persists them (see app.api.routes.books.process_extraction) keyed to the book
@@ -20,7 +20,7 @@ owner.
 
 from typing import Iterable
 
-from app.core.extraction.extractor import NativeAnnotation, PageExtraction, TextSpan
+from app.core.extraction.extractor import NativeAnnotation, PageExtraction, TextRun
 
 # Reading-order window for context, and the max length kept so repeated phrases
 # get disambiguated without storing the whole page.
@@ -44,52 +44,57 @@ def _clip_context(text: str) -> str:
     return text.strip()[-_CONTEXT_MAX_CHARS:]
 
 
-def reconcile_native_annotations(
-    pages: Iterable[PageExtraction],
-    ordered_spans_by_page=None,
-) -> list[dict]:
-    """Turn each page's raw annotation rectangles into text-anchored dicts.
+def reconcile_native_annotations(pages: Iterable[PageExtraction]) -> list[dict]:
+    """Turn each page's raw annotation rectangles into char-anchored dicts.
 
-    ``ordered_spans_by_page`` (optional) lets the caller supply the per-page
-    reading-order span sequence; when omitted we sort each page's spans by
-    (y, x) ourselves (a close enough approximation for context windows).
+    Runs are consumed in reading order (the order they were extracted, which
+    rawdict already produces). Returns a list of dicts for the caller to
+    persist:
 
-    Returns a list of dicts for the caller to persist:
         {"kind", "color", "note", "text", "page", "anchor"}
-    where ``anchor`` is {"text","context_before","context_after","page"}.
+    where ``anchor`` is
+        {"page","start_char","end_char","text","context_before","context_after"}.
     """
     result: list[dict] = []
     for page in pages:
-        spans: list[TextSpan] = (
-            ordered_spans_by_page.get(page.page_number, [])
-            if ordered_spans_by_page
-            else sorted(page.spans, key=lambda s: (s.y0, s.x0))
-        )
         for annot in page.native_annotations:
-            result.append(_reconcile_one(annot, spans, page.page_number))
+            result.append(_reconcile_one(annot, page))
     return result
 
 
-def _overlaps(span: TextSpan, annot: NativeAnnotation) -> bool:
+def _run_bbox(run: TextRun) -> tuple[float, float, float, float]:
+    return run.x, run.y - run.font_size, run.x + max(run.advance, 0.0), run.y
+
+
+def _overlaps(run: TextRun, annot: NativeAnnotation) -> bool:
     # Small tolerance so a tight highlight that barely grazes a glyph still
-    # counts as covering that span.
+    # counts as covering that run.
     tol = 1.0
+    x0, y0, x1, y1 = _run_bbox(run)
     return not (
-        span.x1 < annot.x0 - tol
-        or span.x0 > annot.x1 + tol
-        or span.y1 < annot.y0 - tol
-        or span.y0 > annot.y1 + tol
+        x1 < annot.x0 - tol
+        or x0 > annot.x1 + tol
+        or y1 < annot.y0 - tol
+        or y0 > annot.y1 + tol
     )
 
 
-def _reconcile_one(
-    annot: NativeAnnotation, spans: list[TextSpan], page_number: int
-) -> dict:
-    # Spans arrive in reading order. Find the contiguous run overlapping the
-    # rectangle, plus the run just before (context_before) and after.
+def _char_offsets(runs: list[TextRun]) -> list[tuple[int, int]]:
+    """Global char offsets (start, end) of each run within the page's stream."""
+    offsets: list[tuple[int, int]] = []
+    acc = 0
+    for r in runs:
+        offsets.append((acc, acc + len(r.text)))
+        acc += len(r.text)
+    return offsets
+
+
+def _reconcile_one(annot: NativeAnnotation, page: PageExtraction) -> dict:
+    runs = page.runs
+    offsets = _char_offsets(runs)
     overlaps: list[int] = []
-    for i, s in enumerate(spans):
-        if _overlaps(s, annot):
+    for i, r in enumerate(runs):
+        if _overlaps(r, annot):
             overlaps.append(i)
 
     matched_parts: list[str] = []
@@ -98,22 +103,16 @@ def _reconcile_one(
 
     if overlaps:
         start, end = overlaps[0], overlaps[-1]
-        matched_parts = [s.text.strip() for s in spans[start : end + 1] if s.text.strip()]
+        matched_parts = [runs[i].text.strip() for i in range(start, end + 1) if runs[i].text.strip()]
 
-        before_spans = [
-            s.text.strip()
-            for s in spans[max(0, start - _CONTEXT_SPAN_WINDOW) : start]
-            if s.text.strip()
-        ]
-        context_before = _clip_context(" ".join(before_spans))
+        before_runs = [runs[i].text.strip() for i in range(max(0, start - _CONTEXT_SPAN_WINDOW), start) if runs[i].text.strip()]
+        context_before = _clip_context(" ".join(before_runs))
 
-        after_spans = [
-            s.text.strip()
-            for s in spans[end + 1 : end + 1 + _CONTEXT_SPAN_WINDOW]
-            if s.text.strip()
-        ]
-        context_after = _clip_context(" ".join(after_spans))
+        after_runs = [runs[i].text.strip() for i in range(end + 1, min(len(runs), end + 1 + _CONTEXT_SPAN_WINDOW)) if runs[i].text.strip()]
+        context_after = _clip_context(" ".join(after_runs))
 
+    start_char = offsets[start][0] if overlaps else None
+    end_char = offsets[end][1] if overlaps else None
     text = " ".join(matched_parts)
 
     return {
@@ -121,11 +120,13 @@ def _reconcile_one(
         "color": _rgb_color(annot.color),
         "note": annot.note_text,
         "text": text,
-        "page": page_number,
+        "page": page.page_index,
         "anchor": {
+            "page": page.page_index,
+            "start_char": start_char,
+            "end_char": end_char,
             "text": text,
             "context_before": context_before,
             "context_after": context_after,
-            "page": page_number,
         },
     }

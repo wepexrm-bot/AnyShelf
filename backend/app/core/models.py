@@ -68,7 +68,7 @@ class Book(Base):
     genre = Column(String, nullable=True)
     original_filename = Column(String, nullable=False)
     storage_key = Column(String, nullable=False)  # path in object storage for original PDF
-    structured_text_key = Column(String, nullable=True)  # path to reflow-ready extracted JSON
+    structured_text_key = Column(String, nullable=True)  # path to text-layer JSON (textlayer-v1)
     cover_key = Column(String, nullable=True)  # object-storage key of the book cover image
 
     # Extraction metadata
@@ -76,7 +76,7 @@ class Book(Base):
         Enum("pending", "processing", "done", "failed", name="extraction_status"),
         default="pending",
     )
-    reflow_confidence = Column(Float, nullable=True)  # 0.0-1.0, see structure.py
+    reflow_confidence = Column(Float, nullable=True)  # 0.0-1.0 text-layer coverage
     is_scanned = Column(Boolean, default=False)
     page_count = Column(Float, nullable=True)
 
@@ -110,10 +110,10 @@ class Annotation(Base):
         default="user_created",
         nullable=False,
     )
-    anchor = Column(Text)  # serialized position (page + char range, or reflow offset)
+    anchor = Column(Text)  # serialized position (page + char range, or free text)
     # For pdf_native annotations the anchor is a JSON object of
-    # {"text","context_before","context_after","page"}; `page` is kept here too
-    # as a plain tiebreaker (closest logical page) when identical text appears
+    # {"page","start_char","end_char","text","context_before","context_after"};
+    # `page` is kept here too as a plain tiebreaker when identical text appears
     # in several places.
     page = Column(Integer, nullable=True)
     color = Column(String, nullable=True)

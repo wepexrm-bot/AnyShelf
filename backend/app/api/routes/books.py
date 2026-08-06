@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.models import Book, Annotation, ReadingProgress, ReadingSession, Activity, shelf_books, User
-from app.core.storage import upload_file, get_presigned_url, upload_bytes, delete_file
+from app.core.storage import upload_file, get_presigned_url, upload_bytes, delete_file, download_bytes
 from app.core.extraction.pipeline import run_pipeline
 from app.core.cover_fetch import fetch_cover
 from app.api.routes.auth import get_current_user
@@ -140,7 +140,15 @@ def process_extraction(book_id: str, local_pdf_path: str):
             _extraction_progress[book_id] = int(round(fraction * 100))
 
         set_progress(0.01)
-        result = run_pipeline(local_pdf_path, progress_cb=set_progress)
+
+        def upload_page_image(data: bytes, ext: str) -> str:
+            import uuid as _uuid
+
+            key = f"images/{book.owner_id}/{book_id}/{_uuid.uuid4().hex}.{ext}"
+            upload_bytes(data, storage_key=key, content_type="image/jpeg" if ext == "jpg" else "image/png")
+            return key
+
+        result = run_pipeline(local_pdf_path, progress_cb=set_progress, image_uploader=upload_page_image)
         set_progress(1.0)
 
         structured_key = f"structured/{book.owner_id}/{book_id}.json"
@@ -279,6 +287,91 @@ def get_extraction_progress(
     else:
         progress = _extraction_progress.get(book_id, 0)
     return {"extraction_status": status, "progress": progress}
+
+
+@router.post("/{book_id}/re-extract")
+def re_extract_book(
+    book_id: str,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Re-run extraction for a book whose stored JSON predates the text-layer
+    engine (legacy reflow format, no ``runs``). Downloads the original PDF
+    from object storage and processes it into ``textlayer-v1`` in the
+    background, replacing the stored JSON and confidence columns. The caller
+    can watch ``GET /books/{id}/progress`` while it runs."""
+    book = db.query(Book).filter(Book.id == book_id).first()
+    if not book:
+        raise HTTPException(status_code=404, detail="Book not found")
+    if book.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Not your book")
+    if book.extraction_status == "processing":
+        raise HTTPException(status_code=409, detail="Extraction already in progress")
+
+    try:
+        pdf_bytes = download_bytes(book.storage_key)
+    except Exception as exc:
+        logger.exception("Could not download PDF for re-extract %s: %s", book_id, exc)
+        raise HTTPException(status_code=400, detail="Could not read the original PDF")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(pdf_bytes)
+        tmp_path = tmp.name
+
+    # Flip the status synchronously so an immediate /progress poll reports
+    # "processing" instead of racing the background task's own flip.
+    book.extraction_status = "processing"
+    db.commit()
+    background_tasks.add_task(process_extraction, book.id, tmp_path)
+
+    return {"id": book.id, "status": "processing", "extraction_status": "processing"}
+
+
+@router.get("/{book_id}/images")
+def get_book_images(book_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Per-page placed images with fresh presigned URLs, for the web reader.
+
+    Image storage keys live in the structured text JSON (``pages[].images[]``);
+    they are not directly usable as browser URLs, so the reader asks for them
+    here instead of embedding long-lived URLs in the cached JSON."""
+    book = db.query(Book).filter(Book.id == book_id).first()
+    if not book:
+        raise HTTPException(status_code=404, detail="Book not found")
+    if book.owner_id != user.id:
+        raise HTTPException(status_code=403, detail="Not your book")
+    if not book.structured_text_key:
+        return {"pages": []}
+
+    try:
+        raw = download_bytes(book.structured_text_key)
+    except Exception as exc:
+        logger.warning("Could not read structured text for book %s: %s", book_id, exc)
+        return {"pages": []}
+
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {"pages": []}
+
+    pages = []
+    for p in data.get("pages", []):
+        images = []
+        for img in p.get("images", []):
+            key = img.get("key")
+            if not key:
+                continue
+            images.append(
+                {
+                    "x": img.get("x"),
+                    "y": img.get("y"),
+                    "w": img.get("w"),
+                    "h": img.get("h"),
+                    "url": get_presigned_url(key, inline=True),
+                }
+            )
+        pages.append({"page": p.get("page"), "images": images})
+    return {"pages": pages}
 
 
 class BookUpdate(BaseModel):

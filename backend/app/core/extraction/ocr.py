@@ -1,7 +1,8 @@
 """OCR fallback for pages with no embedded text layer (scanned PDFs).
 
-Produces output in the same TextSpan shape as extractor.py so it can feed
-into the same reading-order/structure reconstruction steps downstream.
+Produces output in the same TextRun shape as extractor.py so scanned pages can
+still participate in the text-layer reading mode: each OCR'd word becomes a
+positioned run (baseline from the box, advance from the box width).
 """
 
 import io
@@ -11,7 +12,7 @@ import fitz
 import pytesseract
 from PIL import Image
 
-from app.core.extraction.extractor import TextSpan
+from app.core.extraction.extractor import TextRun
 from app.config import settings
 
 logger = logging.getLogger("cloudread.ocr")
@@ -27,8 +28,8 @@ def render_page_to_image(pdf_path: str, page_number: int, dpi: int = 300) -> Ima
     return img
 
 
-def ocr_page(pdf_path: str, page_number: int) -> tuple[list[TextSpan], float]:
-    """Run OCR on a single page. Returns (spans, avg_confidence 0-1)."""
+def ocr_page(pdf_path: str, page_number: int) -> tuple[list[TextRun], float]:
+    """Run OCR on a single page. Returns (runs, avg_confidence 0-1)."""
     image = render_page_to_image(pdf_path, page_number)
 
     if settings.use_cloud_ocr:
@@ -42,12 +43,12 @@ def ocr_page(pdf_path: str, page_number: int) -> tuple[list[TextSpan], float]:
     except Exception as exc:
         # Tesseract not installed / not on PATH. Don't fail the whole book:
         # pages without a text layer just contribute no OCR content instead
-        # of crashing extraction (a single image cover shouldn't kill a
+        # of crashing extraction (a single image cover shouldn't kill an
         # otherwise text-based PDF).
-        logger.warning("OCR unavailable (book=%s page=%s): %s", pdf_path, page_number, exc)
+        logger.warning("OCR unavailable (page=%s): %s", page_number, exc)
         return [], 0.0
 
-    spans: list[TextSpan] = []
+    runs: list[TextRun] = []
     confidences: list[float] = []
 
     for i, text in enumerate(data["text"]):
@@ -60,18 +61,18 @@ def ocr_page(pdf_path: str, page_number: int) -> tuple[list[TextSpan], float]:
         confidences.append(conf)
 
         x, y, w, h = data["left"][i], data["top"][i], data["width"][i], data["height"][i]
-        spans.append(
-            TextSpan(
+        runs.append(
+            TextRun(
                 text=text,
-                x0=x,
-                y0=y,
-                x1=x + w,
-                y1=y + h,
+                x=float(x),
+                y=float(y + h),  # baseline sits on the box's bottom edge
+                font_size=float(h),
+                advance=float(w),
                 font="ocr",
-                size=float(h),
-                page_number=page_number,
+                flags=0,
+                page_index=page_number,
             )
         )
 
     avg_confidence = (sum(confidences) / len(confidences) / 100) if confidences else 0.0
-    return spans, avg_confidence
+    return runs, avg_confidence

@@ -1,8 +1,19 @@
-﻿import React, { useCallback, useEffect, useRef, useState } from "react";
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useNavigate, useLocation } from "react-router-dom";
 import ThemeControls, { FONT_OPTIONS, THEME_PRESETS } from "./ThemeControls";
-import BookPaginate from "./BookPaginate";
+import { TextLayerScrollView, TextLayerPaginateView, resolveHighlights } from "./TextLayerView";
 import { api } from "../api";
+
+// Zoom is client-side only (per browser) so it never collides with the shared
+// server `font_size` field that mobile uses for its own zoom control.
+function storedZoom() {
+  try {
+    const raw = JSON.parse(localStorage.getItem("reader_zoom"));
+    if (raw === "width" || raw === "page") return raw;
+    if (typeof raw === "number" && raw >= 10 && raw <= 400) return raw;
+  } catch {}
+  return "width";
+}
 
 const DEFAULT_THEME = {
   themeId: "light",
@@ -16,7 +27,8 @@ const DEFAULT_THEME = {
   marginId: "medium",
   margins: 96,
   mode: "scroll",
-  pageLayout: "spread",
+  pageLayout: "single",
+  zoom: storedZoom(),
 };
 
 function hexToRgba(hex, alpha) {
@@ -32,10 +44,7 @@ function hexToRgba(hex, alpha) {
 // a light reader theme inside a dark-mode app would render dark surfaces
 // with dark text (invisible content).
 function readerThemeVars(theme) {
-  let dark;
-  if (theme.themeId === "dark" || theme.themeId === "night") dark = true;
-  else dark = false;
-
+  const dark = theme.themeId === "dark" || theme.themeId === "night";
   if (dark) {
     return {
       "--surface": "#121412",
@@ -77,6 +86,7 @@ export default function Reader() {
   const backTo = location.state?.from || "/";
   const [book, setBook] = useState(null);
   const [structuredText, setStructuredText] = useState(null);
+  const [imagesByPage, setImagesByPage] = useState(() => new Map());
   const [extraction, setExtraction] = useState(null);
   const [theme, setTheme] = useState(DEFAULT_THEME);
   const [panel, setPanel] = useState(null);
@@ -87,10 +97,23 @@ export default function Reader() {
   const [pageCount, setPageCount] = useState(0);
   const scrollRef = useRef(null);
   const pageRefs = useRef([]);
+  const reExtractRequestedRef = useRef(false);
+  const settingsHydratedRef = useRef(false);
   const [jumpValue, setJumpValue] = useState("1");
   const [jumpFocused, setJumpFocused] = useState(false);
+  const [chromeVisible, setChromeVisible] = useState(true);
 
-  const handleBookPageChange = useCallback((idx, total) => {
+  const hasTextLayer = useMemo(
+    () => !!structuredText?.pages?.some((p) => (p.runs || []).length > 0),
+    [structuredText]
+  );
+
+  const highlights = useMemo(
+    () => (structuredText?.pages ? resolveHighlights(annotations, structuredText.pages) : new Map()),
+    [annotations, structuredText]
+  );
+
+  const handlePageNav = useCallback((idx, total) => {
     setCurrentPage(idx + 1);
     if (total > 0) setProgress(((idx + 1) / total) * 100);
   }, []);
@@ -101,6 +124,10 @@ export default function Reader() {
       if (!n || !pageCount) return;
       const clamped = Math.max(1, Math.min(pageCount, n));
       setJumpValue(String(clamped));
+      if (theme.mode === "paginate") {
+        handlePageNav(clamped - 1, pageCount);
+        return;
+      }
       const el = pageRefs.current[clamped - 1];
       const container = scrollRef.current;
       if (!el || !container) return;
@@ -111,7 +138,7 @@ export default function Reader() {
         behavior: "smooth",
       });
     },
-    [pageCount]
+    [pageCount, theme.mode, handlePageNav]
   );
 
   useEffect(() => {
@@ -148,9 +175,46 @@ export default function Reader() {
     setTheme((t) => ({ ...t, mode }));
   }, []);
 
-  // Persist reading-mode changes made from the header toggle
+  // Clicking the reading surface toggles the chrome (header/footer/settings).
+  // Ignore clicks on interactive elements and text selections so toggling never
+  // fights the user's page-turns or highlighting.
+  const toggleChrome = useCallback((e) => {
+    if (e.target.closest("button, input, a, iframe")) return;
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed && sel.toString().length > 0) return;
+    setChromeVisible((v) => {
+      if (v) setPanel(null);
+      return !v;
+    });
+  }, []);
+
+  // Text selection in the page -> create a char-range highlight.
+  const createHighlight = useCallback(
+    async (page, startChar, endChar, text) => {
+      if (!text) return;
+      try {
+        await api("/sync/annotations", {
+          method: "POST",
+          body: {
+            book_id: bookId,
+            kind: "highlight",
+            anchor: JSON.stringify({ page, start_char: startChar, end_char: endChar, text }),
+            note_text: null,
+          },
+        });
+        await refreshAnnotations();
+      } catch (err) {
+        alert(err.message);
+      }
+    },
+    [bookId, refreshAnnotations]
+  );
+
+  // Persist reading-mode changes made from the header toggle. Guarded by a
+  // hydration ref so the effect never fires while the saved settings are still
+  // loading (otherwise the still-default theme would overwrite the server row).
   useEffect(() => {
-    if (!book) return;
+    if (!book || !settingsHydratedRef.current) return;
     const timer = setTimeout(() => {
       api("/settings/", {
         method: "PUT",
@@ -180,9 +244,11 @@ export default function Reader() {
       setProgressLoaded(false);
       setCurrentPage(0);
       setAnnotations([]);
+      settingsHydratedRef.current = false;
       const data = await api(`/books/${bookId}`);
       if (cancelled) return;
       setBook(data);
+      let totalPages = 0;
       const extractingNow =
         data.extraction_status === "pending" || data.extraction_status === "processing";
       setExtraction(
@@ -191,15 +257,57 @@ export default function Reader() {
       if (extractingNow && !timer) timer = setTimeout(poll, 1000);
 
       if (data.structured_text_url) {
-        try {
-          const res = await fetch(data.structured_text_url);
-          const st = await res.json();
-          if (cancelled) return;
-          setStructuredText(st);
-          setPageCount(st.pages?.length || 0);
-        } catch {
-          if (cancelled) return;
-          setStructuredText(null);
+        let st = null;
+        for (let attempt = 0; attempt < 3 && !st; attempt++) {
+          try {
+            const res = await fetch(data.structured_text_url);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            st = await res.json();
+          } catch {
+            if (cancelled) return;
+            if (attempt < 2) await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+          }
+        }
+        if (cancelled) return;
+        setStructuredText(st);
+        totalPages = st?.pages?.length || 0;
+        setPageCount(totalPages);
+
+        // Per-page placed images (cover art / illustrations), stored in object
+        // storage by the extractor. Fetch lazily so the text layer renders
+        // immediately; images stream in behind it.
+        if (st?.pages?.length && !cancelled) {
+          try {
+            const imgData = await api(`/books/${bookId}/images`);
+            const map = new Map();
+            for (const p of imgData.pages || []) {
+              if (p.images?.length) map.set(p.page, p.images);
+            }
+            if (!cancelled) setImagesByPage(map);
+          } catch {}
+        }
+
+        // Legacy books store pre-text-layer reflow JSON (no `schema`/`runs`).
+        // Auto re-extract once per session so they get the new text layer
+        // instead of the "not re-extracted yet" fallback. textlayer-v1 books
+        // with no runs (e.g. scanned with OCR unavailable) are NOT legacy --
+        // re-extracting them would change nothing.
+        const legacyFormat = !!st && st.schema !== "textlayer-v1";
+        if (
+          legacyFormat &&
+          !reExtractRequestedRef.current &&
+          data.extraction_status !== "pending" &&
+          data.extraction_status !== "processing"
+        ) {
+          reExtractRequestedRef.current = true;
+          try {
+            await api(`/books/${bookId}/re-extract`, { method: "POST" });
+            if (cancelled) return;
+            setExtraction({ status: "processing", progress: 0 });
+            if (!timer) timer = setTimeout(poll, 1000);
+          } catch {
+            reExtractRequestedRef.current = false;
+          }
         }
       }
 
@@ -213,7 +321,8 @@ export default function Reader() {
       if (savedSettings) {
         const preset = THEME_PRESETS.find((p) => p.id === savedSettings.theme) || THEME_PRESETS[0];
         const font = FONT_OPTIONS.find((f) => f.id === savedSettings.font_family) || FONT_OPTIONS[0];
-        setTheme({
+        setTheme((prev) => ({
+          ...prev,
           themeId: savedSettings.theme,
           background: preset.background,
           surface: preset.surface,
@@ -230,13 +339,23 @@ export default function Reader() {
               ? 144
               : 96,
           mode: savedSettings.reading_mode || "scroll",
-          pageLayout: savedSettings.page_layout || "spread",
-        });
+          pageLayout: savedSettings.page_layout || "single",
+        }));
       }
+      settingsHydratedRef.current = true;
 
       if (savedProgress) {
         const pc = savedProgress.current_page || 0;
         setProgress(pc);
+        // Paginate mode has no scroll position to restore, so resume at the
+        // page that matches the saved percentage. Scroll mode restores via
+        // scrollTop in its own effect.
+        const mode = (savedSettings && savedSettings.reading_mode) || "scroll";
+        const total = totalPages || 0;
+        if (mode === "paginate" && total > 0 && pc > 0) {
+          const pageNum = Math.max(1, Math.min(total, Math.round((pc / 100) * total)));
+          setCurrentPage(pageNum);
+        }
       }
       setProgressLoaded(true);
       setAnnotations(savedAnnotations);
@@ -273,31 +392,38 @@ export default function Reader() {
     if (theme.mode !== "scroll") return;
     const el = scrollRef.current;
     if (!el) return;
+    let raf = null;
     const updateFromScroll = () => {
-      const max = el.scrollHeight - el.clientHeight;
-      if (max <= 0) return;
-      const pct = Math.min(100, Math.max(0, (el.scrollTop / max) * 100));
-      setProgress(pct);
-      const containerTop = el.getBoundingClientRect().top;
-      const readLine = containerTop + 80;
-      let cur = 0;
-      for (let i = 0; i < pageRefs.current.length; i++) {
-        const p = pageRefs.current[i];
-        if (!p) continue;
-        if (p.getBoundingClientRect().top <= readLine) cur = i + 1;
-      }
-      if (cur > 0) setCurrentPage(cur);
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = null;
+        const max = el.scrollHeight - el.clientHeight;
+        if (max <= 0) return;
+        const pct = Math.min(100, Math.max(0, (el.scrollTop / max) * 100));
+        setProgress(pct);
+        const containerTop = el.getBoundingClientRect().top;
+        const readLine = containerTop + 80;
+        let cur = 0;
+        for (let i = 0; i < pageRefs.current.length; i++) {
+          const p = pageRefs.current[i];
+          if (!p) continue;
+          if (p.getBoundingClientRect().top <= readLine) cur = i + 1;
+        }
+        if (cur > 0) setCurrentPage(cur);
+      });
     };
     el.addEventListener("scroll", updateFromScroll);
-    return () => el.removeEventListener("scroll", updateFromScroll);
+    updateFromScroll();
+    return () => {
+      el.removeEventListener("scroll", updateFromScroll);
+      if (raf) cancelAnimationFrame(raf);
+    };
   }, [book, theme.mode]);
 
   // Resume at the current relative position whenever entering scroll mode,
   // but only after saved progress has actually loaded (otherwise it would
   // restore to 0% / page 1 before the server responds). Re-applies once
   // web fonts finish loading so a late reflow doesn't throw off the spot.
-  // `progress` is intentionally NOT a dependency, so scrolling within scroll
-  // mode never re-triggers a restore (which would fight the reader).
   const lastRestoreTopRef = useRef(-1);
   useEffect(() => {
     if (theme.mode !== "scroll" || !book || !structuredText || !progressLoaded) return;
@@ -393,7 +519,7 @@ export default function Reader() {
     }
   }, [currentPage]);
 
-  if (!book) return <div className="loading">Loading bookâ€¦</div>;
+  if (!book) return <div className="loading">Loading book…</div>;
 
   if (extraction) {
     const pct = Math.min(100, Math.max(0, Math.round(extraction.progress || 0)));
@@ -434,16 +560,6 @@ export default function Reader() {
     );
   }
 
-  const reflowAvailable = book.reflow_confidence >= 0.5 && structuredText;
-  const allBlocks = reflowAvailable
-    ? structuredText.pages.flatMap((p) => p.blocks || [])
-    : [];
-
-  const readingStyle = {
-    background: theme.background,
-    color: theme.textColor,
-  };
-
   return (
     <div
       style={{
@@ -465,15 +581,19 @@ export default function Reader() {
       {/* Top nav */}
       <header
         style={{
-          height: 56,
+          height: chromeVisible ? 56 : 0,
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
           padding: "0 24px",
           background: hexToRgba(theme.background, 0.9),
           backdropFilter: "blur(12px)",
-          borderBottom: "1px solid rgba(194,201,187,0.3)",
+          borderBottom: chromeVisible ? "1px solid rgba(194,201,187,0.3)" : "none",
           flexShrink: 0,
+          zIndex: 20,
+          overflow: "hidden",
+          opacity: chromeVisible ? 1 : 0,
+          transition: "height 0.22s ease, opacity 0.18s ease",
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -500,6 +620,16 @@ export default function Reader() {
               bookmark
             </span>
           </button>
+          {structuredText?.outline?.length > 0 && (
+            <button
+              className="btn-icon"
+              title="Table of contents"
+              onClick={() => setPanel((p) => (p === "toc" ? null : "toc"))}
+              style={panel === "toc" ? { color: "var(--primary)", background: "var(--surface-container-high)" } : {}}
+            >
+              <span className="icon" style={{ fontSize: 22 }}>toc</span>
+            </button>
+          )}
           <div
             style={{
               display: "flex",
@@ -557,46 +687,61 @@ export default function Reader() {
       </header>
 
       {/* Body */}
-      <div style={{ display: "flex", flex: 1, minHeight: 0, position: "relative" }}>
+      <div style={{ display: "flex", flex: 1, minHeight: 0, position: "relative" }} onClick={toggleChrome}>
         <div
           ref={scrollRef}
           style={{
             flex: 1,
-            overflowY: "auto",
-            padding: theme.mode === "paginate" ? "24px" : `48px ${theme.margins}px 120px`,
-            display: theme.mode === "paginate" ? "flex" : "block",
+            minHeight: 0,
+            position: "relative",
+            overflowY: theme.mode === "paginate" ? "hidden" : "auto",
+            overflowX: theme.mode === "paginate" ? "hidden" : "auto",
           }}
         >
-          {reflowAvailable ? (
+          {hasTextLayer ? (
             theme.mode === "paginate" ? (
-              <BookPaginate
+              <TextLayerPaginateView
                 key={book.id}
-                contentKey={book.id}
-                blocks={allBlocks}
+                pages={structuredText.pages}
                 theme={theme}
-                initialProgress={progressLoaded ? progress : 0}
-                onPageChange={handleBookPageChange}
-                spread={theme.pageLayout === "spread"}
+                pageLayout={theme.pageLayout}
+                highlights={highlights}
+                imagesByPage={imagesByPage}
+                page={Math.min(Math.max(currentPage - 1, 0), pageCount - 1)}
+                onPageChange={handlePageNav}
+                onSelectionCapture={createHighlight}
               />
             ) : (
-              <ReflowView data={structuredText} theme={theme} currentPage={currentPage} setCurrentPage={setCurrentPage} pageRefs={pageRefs} />
+              <TextLayerScrollView
+                key={book.id}
+                pages={structuredText.pages}
+                theme={theme}
+                highlights={highlights}
+                imagesByPage={imagesByPage}
+                pageRefs={pageRefs}
+                onSelectionCapture={createHighlight}
+              />
             )
           ) : (
-            <div style={{ maxWidth: 720, margin: "0 auto" }}>
+            <div style={{ maxWidth: 720, margin: "0 auto", padding: "48px 24px 120px" }}>
               <p className="text-muted" style={{ marginBottom: 16 }}>
-                Reflow mode isn't available for this book (likely scanned or complex layout).
+                This book hasn't been re-extracted with the text-layer format yet. It will appear
+                here once processed — until then, view the original PDF below.
               </p>
-              <iframe
-                title="pdf"
-                src={book.pdf_url}
-                style={{ width: "100%", height: "76vh", border: "1px solid var(--outline-variant)", borderRadius: 8 }}
-              />
+              {book.pdf_url && (
+                <iframe
+                  title="pdf"
+                  src={book.pdf_url}
+                  style={{ width: "100%", height: "76vh", border: "1px solid var(--outline-variant)", borderRadius: 8 }}
+                />
+              )}
             </div>
           )}
         </div>
 
         {panel && (
           <div
+            onClick={(e) => e.stopPropagation()}
             style={{
               position: "absolute",
               top: 0,
@@ -616,11 +761,23 @@ export default function Reader() {
               />
             )}
 
+            {panel === "toc" && (
+              <TocPanel
+                outline={structuredText?.outline || []}
+                currentPage={currentPage}
+                onSelect={(page) => {
+                  setPanel(null);
+                  jumpToPage(String(page + 1));
+                }}
+                onClose={() => setPanel(null)}
+              />
+            )}
+
             {panel === "settings" && (
               <ThemeControls
                 theme={theme}
                 setTheme={setTheme}
-                reflowAvailable={reflowAvailable}
+                reflowAvailable={hasTextLayer}
                 onClose={() => setPanel(null)}
               />
             )}
@@ -631,7 +788,7 @@ export default function Reader() {
       {/* Bottom toolbar */}
       <footer
         style={{
-          height: 56,
+          height: chromeVisible ? 56 : 0,
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
@@ -639,13 +796,16 @@ export default function Reader() {
           padding: "0 24px",
           background: hexToRgba(theme.background, 0.95),
           backdropFilter: "blur(12px)",
-          borderTop: "1px solid rgba(194,201,187,0.3)",
+          borderTop: chromeVisible ? "1px solid rgba(194,201,187,0.3)" : "none",
           flexShrink: 0,
           zIndex: 20,
+          overflow: "hidden",
+          opacity: chromeVisible ? 1 : 0,
+          transition: "height 0.22s ease, opacity 0.18s ease",
         }}
       >
         <div style={{ fontSize: 12, color: "var(--on-surface-variant)", whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 10 }}>
-          {theme.mode === "scroll" && pageCount > 0 && (
+          {pageCount > 0 && (
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <span>Page</span>
               <input
@@ -692,111 +852,92 @@ export default function Reader() {
           </div>
           <span style={{ fontSize: 11, color: "var(--on-surface-variant)" }}>100%</span>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 12, color: "var(--on-surface-variant)" }}>Reflow</span>
-          <button
-            role="switch"
-            aria-checked={reflowAvailable}
-            onClick={() => {}}
-            style={{
-              width: 36,
-              height: 20,
-              borderRadius: 999,
-              background: reflowAvailable ? "var(--primary)" : "var(--outline-variant)",
-              border: "none",
-              position: "relative",
-              transition: "background-color 0.2s",
-            }}
-          >
-            <span
-              style={{
-                position: "absolute",
-                top: 2,
-                left: reflowAvailable ? 18 : 2,
-                width: 16,
-                height: 16,
-                borderRadius: "50%",
-                background: "#fff",
-                boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
-                transition: "left 0.2s",
-              }}
-            />
-          </button>
+        <div style={{ fontSize: 12, color: "var(--on-surface-variant)" }}>
+          {Math.round(currentPage || 0)} / {pageCount || "—"}
         </div>
       </footer>
     </div>
   );
 }
 
-function ReflowView({ data, theme, currentPage, setCurrentPage, pageRefs }) {
-  const pages = data.pages || [];
+function TocPanel({ outline, currentPage, onSelect, onClose }) {
   return (
-    <div
+    <aside
       style={{
-        maxWidth: 720,
-        margin: "0 auto",
-        background: theme.surface,
-        border: `1px solid ${hexToRgba(theme.textColor, 0.16)}`,
-        borderRadius: 12,
-        boxShadow: "0 4px 30px rgba(63,56,39,0.05)",
-        padding: "56px 64px",
-        fontFamily: theme.font,
-        fontSize: theme.fontSize,
-        lineHeight: theme.lineSpacing,
-        color: theme.textColor,
+        width: 320,
+        borderLeft: "1px solid rgba(194,201,187,0.3)",
+        borderTopLeftRadius: 16,
+        borderBottomLeftRadius: 16,
+        overflow: "hidden",
+        background: "var(--surface-container-low)",
+        color: "var(--on-surface)",
+        display: "flex",
+        flexDirection: "column",
+        flexShrink: 0,
+        boxShadow: "-16px 0 40px rgba(0,0,0,0.18)",
       }}
     >
-      {pages.flatMap((page, pageIdx) => {
-        const blocks = (page.blocks || []).filter((b) => b.text && b.text.trim());
-        const onScreen = (el) => {
-          if (!el) return;
-          const rect = el.getBoundingClientRect();
-          if (rect.top < 100) {
-            setCurrentPage(pageIdx + 1);
-          }
-        };
-        return [
-          <div
-            key={`page-${page.page_number || pageIdx}`}
-            ref={(el) => {
-              pageRefs.current[pageIdx] = el;
-              onScreen(el);
-            }}
-          >
-            {blocks.map((block, i) =>
-              block.kind === "heading" ? (
-                <h2
-                  key={i}
-                  style={{
-                    fontFamily: "var(--font-display)",
-                    fontSize: theme.fontSize * 1.45,
-                    fontWeight: 700,
-                    margin: "1.6em 0 0.7em",
-                    lineHeight: 1.3,
-                    color: theme.textColor,
-                  }}
-                >
-                  {block.text}
-                </h2>
-              ) : (
-                <p key={i} style={{ margin: "0 0 1.1em" }}>
-                  {block.text}
-                </p>
-              )
-            )}
-          </div>,
-          pageIdx < pages.length - 1 ? (
-            <div
-              key={`pb-${page.page_number || pageIdx}`}
-              style={{ borderTop: `1px solid ${hexToRgba(theme.textColor, 0.2)}`, margin: "2.5em auto", width: "40%", textAlign: "center" }}
-            />
-          ) : null,
-        ];
-      })}
-    </div>
+      <div style={{ padding: "16px 20px", borderBottom: "1px solid rgba(194,201,187,0.3)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <h3 style={{ fontFamily: "var(--font-display)", fontSize: 16, margin: 0 }}>Table of Contents</h3>
+        <button className="btn-icon" onClick={onClose} title="Close">
+          <span className="icon" style={{ fontSize: 16 }}>close</span>
+        </button>
+      </div>
+      <div style={{ flex: 1, overflowY: "auto", padding: "12px 0" }}>
+        {outline.length === 0 ? (
+          <div className="text-muted" style={{ fontSize: 14, padding: "0 20px" }}>
+            No table of contents found.
+          </div>
+        ) : (
+          outline.map((item, i) => {
+            const pad = Math.min(item.level, 6) * 14;
+            const active = currentPage === item.page + 1;
+            return (
+              <button
+                key={i}
+                onClick={() => onSelect(item.page)}
+                style={{
+                  width: "100%",
+                  display: "flex",
+                  alignItems: "baseline",
+                  gap: 8,
+                  padding: "8px 20px",
+                  paddingLeft: 20 + pad,
+                  border: "none",
+                  background: active ? "rgba(21,66,18,0.08)" : "transparent",
+                  color: active ? "var(--primary)" : "var(--on-surface)",
+                  textAlign: "left",
+                  cursor: "pointer",
+                  fontSize: item.level > 1 ? 13 : 14,
+                  fontWeight: item.level === 1 ? 600 : 400,
+                  fontFamily: "inherit",
+                }}
+              >
+                <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {item.title}
+                </span>
+                <span style={{ fontSize: 11, color: "var(--on-surface-variant)", flexShrink: 0 }}>
+                  {item.page + 1}
+                </span>
+              </button>
+            );
+          })
+        )}
+      </div>
+    </aside>
   );
 }
 
+function anchorLabel(a) {  if (a.kind === "bookmark") return a.anchor;
+  if (a.anchor && a.anchor.startsWith("{")) {
+    try {
+      const p = JSON.parse(a.anchor);
+      if (p.text) return `"${p.text}"`;
+      if (typeof p.page === "number") return `Page ${p.page + 1}`;
+    } catch {}
+  }
+  return a.anchor || "Note";
+}
 
 function HighlightsPanel({ annotations, bookId, setAnnotations, theme, onClose }) {
   const [composing, setComposing] = useState(false);
@@ -872,7 +1013,8 @@ function HighlightsPanel({ annotations, bookId, setAnnotations, theme, onClose }
       <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
         {annotations.length === 0 ? (
           <div className="text-muted" style={{ fontSize: 14 }}>
-            No bookmarks or notes yet. Bookmark a page from the reader to save your place.
+            No highlights, notes, or bookmarks yet. Select text in the reader to highlight, or
+            bookmark a page from the header.
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -893,14 +1035,8 @@ function HighlightsPanel({ annotations, bookId, setAnnotations, theme, onClose }
                     {a.kind === "bookmark" && (
                       <span className="icon" style={{ fontSize: 15, color: "var(--primary)" }}>bookmark</span>
                     )}
-                    <span style={{ fontStyle: a.kind !== "bookmark" ? "italic" : "normal" }}>
-                      {a.kind === "bookmark"
-                        ? a.anchor
-                        : a.kind === "note" && !a.anchor
-                        ? "Note"
-                        : a.kind === "note"
-                        ? a.anchor
-                        : `"${a.anchor}"`}
+                    <span style={{ fontStyle: a.kind !== "bookmark" ? "italic" : "normal", overflowWrap: "anywhere" }}>
+                      {anchorLabel(a)}
                     </span>
                   </div>
                   {a.note_text && (

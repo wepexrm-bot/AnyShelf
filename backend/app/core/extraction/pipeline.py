@@ -1,9 +1,11 @@
-"""Orchestrates the full extraction pipeline end to end:
+"""Orchestrates the text-layer extraction pipeline end to end:
 
-upload -> extract spans -> (OCR fallback if scanned) -> reading order ->
-paragraph/heading reconstruction -> confidence score -> structured JSON
+upload -> extract positioned runs -> (OCR fallback if scanned) ->
+assemble text-layer JSON + outline + coverage + native annotation anchors
 
 This is the module the background job (triggered on upload) calls.
+The output schema (``textlayer-v1``) mirrors pdf.js ``getTextContent()`` text
+items so clients can render the PDF's native text layer faithfully.
 """
 
 import json
@@ -11,24 +13,21 @@ import json
 from app.config import settings
 
 
-def run_pipeline(pdf_path: str, progress_cb=None) -> dict:
-    """Run the full extraction pipeline.
+def run_pipeline(pdf_path: str, progress_cb=None, image_uploader=None) -> dict:
+    """Run the full text-layer pipeline.
 
     ``progress_cb`` (if given) is called with a fraction (0.0-1.0) at each
     stage so callers can surface live 0-100% progress to the user.
+
+    ``image_uploader`` (if given) is a ``callable(data: bytes, ext: str) ->
+    storage_key`` used to persist each page image to object storage. When
+    absent, images are extracted but not persisted and pages carry an empty
+    ``images`` list (used by tests / callers that only need text).
     """
 
-    from app.core.extraction.extractor import extract_spans, get_pdf_outline
+    from app.core.extraction.extractor import extract_text_runs, get_pdf_outline
     from app.core.extraction.ocr import ocr_page
-    from app.core.extraction.reading_order import order_reading_sequence
-    from app.core.extraction.structure import (
-        filter_running_noise,
-        group_into_lines,
-        Line,
-        reconstruct_blocks_from_lines,
-        score_reflow_confidence,
-        StructuredPage,
-    )
+    from app.core.extraction.coverage import text_coverage
     from app.core.extraction.annotations import reconcile_native_annotations
 
     def report(fraction: float):
@@ -37,66 +36,70 @@ def run_pipeline(pdf_path: str, progress_cb=None) -> dict:
 
     report(0.05)
 
-    pages = extract_spans(pdf_path, progress_cb=lambda f: report(0.05 + 0.20 * f))
+    pages = extract_text_runs(pdf_path, progress_cb=lambda f: report(0.05 + 0.20 * f))
     outline = get_pdf_outline(pdf_path)
     report(0.28)
 
     total_pages = max(len(pages), 1)
-
-    # Group spans into lines per page first, so we can drop running
-    # headers/footers and page numbers (repeated noise) before reconstructing
-    # paragraphs. After two-up splitting, pages are logical book pages; their
-    # pdf_page_index still points at the physical PDF page for OCR.
-    lines_by_page: list[list[Line]] = []
-    scanned_page_count = 0
-    # Reading-order span sequence per logical page, kept for reconciling the
-    # job's native PDF annotations against the text they cover.
-    ordered_spans_by_page: dict[int, list] = {}
+    pages_with_text = 0
 
     for page_index, page in enumerate(pages):
-        spans = page.spans
-
         if not page.has_text_layer:
-            scanned_page_count += 1
-            ocr_spans, ocr_confidence = ocr_page(pdf_path, page.pdf_page_index)
-            spans = ocr_spans
-            if ocr_confidence < settings.ocr_confidence_threshold:
-                # Very low-confidence OCR: still record what we found, but
-                # this page will drag the overall reflow score down below.
-                pass
-
-        ordered = order_reading_sequence(spans, page.page_width)
-        ordered_spans_by_page[page.page_number] = ordered
-        lines_by_page.append(group_into_lines(ordered))
+            ocr_runs, ocr_confidence = ocr_page(pdf_path, page_index)
+            if ocr_confidence >= settings.ocr_confidence_threshold and ocr_runs:
+                page.runs = ocr_runs
+            else:
+                # Low-confidence OCR or no text at all: keep the page blank so
+                # it drags the coverage score down (and can fall back to the
+                # raster PDF viewer when coverage is very low).
+                page.runs = []
+        if page.runs:
+            pages_with_text += 1
         report(0.30 + 0.62 * ((page_index + 1) / total_pages))
 
-    page_heights = [p.page_height for p in pages]
-    lines_by_page = filter_running_noise(lines_by_page, page_heights)
     report(0.94)
-
-    structured_pages: list[StructuredPage] = []
-    for page, lines in zip(pages, lines_by_page):
-        blocks = reconstruct_blocks_from_lines(lines)
-        structured_pages.append(StructuredPage(page_number=page.page_number, blocks=blocks))
-
-    scanned_ratio = scanned_page_count / len(pages) if pages else 0.0
-    confidence = score_reflow_confidence(structured_pages, scanned_ratio, outline=outline)
+    coverage = text_coverage(pages_with_text, total_pages)
+    imported_annotations = reconcile_native_annotations(pages)
     report(0.98)
 
-    imported_annotations = reconcile_native_annotations(pages, ordered_spans_by_page)
-
     result = {
+        "schema": "textlayer-v1",
         "outline": outline,
-        "reflow_confidence": confidence,
-        "is_scanned": scanned_ratio > 0.5,
-        "reflow_mode_recommended": confidence >= 0.5,
+        "text_confidence": coverage,
+        "reflow_confidence": coverage,
+        "is_scanned": coverage < 0.5,
+        "reflow_mode_recommended": coverage >= 0.5,
         "imported_annotations": imported_annotations,
         "pages": [
             {
-                "page_number": p.page_number,
-                "blocks": [{"kind": b.kind, "text": b.text, "level": b.level} for b in p.blocks],
+                "page": p.page_index,
+                "width": round(p.width, 2),
+                "height": round(p.height, 2),
+                "rotation": p.rotation,
+                "runs": [
+                    {
+                        "t": r.text,
+                        "x": round(r.x, 2),
+                        "y": round(r.y, 2),
+                        "fs": round(r.font_size, 2),
+                        "w": round(r.advance, 2),
+                        "f": r.font,
+                        "flags": r.flags,
+                    }
+                    for r in p.runs
+                ],
+                "images": [
+                    {
+                        "x": round(img.x0, 2),
+                        "y": round(img.y0, 2),
+                        "w": round(img.x1 - img.x0, 2),
+                        "h": round(img.y1 - img.y0, 2),
+                        "key": image_uploader(img.data, img.ext) if image_uploader else None,
+                    }
+                    for img in p.images
+                ],
             }
-            for p in structured_pages
+            for p in pages
         ],
     }
     return result

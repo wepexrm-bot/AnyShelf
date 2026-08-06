@@ -14,8 +14,7 @@ export const THEME_PRESETS = [
   { id: "forest", label: "Forest", background: "#e4efe3", textColor: "#1c2a20", surface: "#f2f8f1" },
 ];
 
-export const FONT_OPTIONS = [
-  { id: "serif", label: "Serif", stack: "'Source Serif 4', Georgia, serif" },
+export const FONT_OPTIONS = [  { id: "serif", label: "Serif", stack: "'Source Serif 4', Georgia, serif" },
   { id: "sans", label: "Sans", stack: "'Inter', system-ui, sans-serif" },
   { id: "dyslexic", label: "Dyslexic", stack: "'OpenDyslexic', 'Comic Sans MS', sans-serif" },
   { id: "lora", label: "Lora", stack: "'Lora', Georgia, serif" },
@@ -39,6 +38,25 @@ const MARGIN_OPTIONS = [
   { id: "large", label: "Large", inset: 144 },
 ];
 
+// Zoom presets: fit the reading width, fit the whole page, or a percentage of
+// the PDF's natural size. Client-side only (kept in localStorage) so the shared
+// server `font_size` field keeps meaning for mobile.
+const ZOOM_PRESETS = [
+  { value: "width", label: "Fit Width", icon: "swap_horiz" },
+  { value: "page", label: "Fit Page", icon: "crop_free" },
+  { value: 50, label: "50%" },
+  { value: 60, label: "60%" },
+  { value: 75, label: "75%" },
+  { value: 100, label: "100%" },
+  { value: 125, label: "125%" },
+  { value: 150, label: "150%" },
+  { value: 200, label: "200%" },
+];
+
+function zoomIsActive(theme, preset) {
+  return theme.zoom === preset.value || (theme.zoom == null && preset.value === "width");
+}
+
 export default function ThemeControls({ theme, setTheme, reflowAvailable, onClose }) {
   const [dirty, setDirty] = useState(false);
   const [fontOpen, setFontOpen] = useState(false);
@@ -46,6 +64,11 @@ export default function ThemeControls({ theme, setTheme, reflowAvailable, onClos
 
   const applyTheme = (patch) => {
     setTheme({ ...theme, ...patch });
+    if ("zoom" in patch) {
+      try {
+        localStorage.setItem("reader_zoom", JSON.stringify(patch.zoom));
+      } catch {}
+    }
     setDirty(true);
   };
 
@@ -93,9 +116,13 @@ export default function ThemeControls({ theme, setTheme, reflowAvailable, onClos
       marginId: "medium",
       margins: 96,
       mode: "scroll",
-      pageLayout: "spread",
+      pageLayout: "single",
+      zoom: "width",
     };
     setTheme(defaults);
+    try {
+      localStorage.removeItem("reader_zoom");
+    } catch {}
     setDirty(false);
     try {
       await api("/settings/", {
@@ -107,7 +134,7 @@ export default function ThemeControls({ theme, setTheme, reflowAvailable, onClos
           line_spacing: 1.6,
           margins: "medium",
           reading_mode: "scroll",
-          page_layout: "spread",
+          page_layout: "single",
         },
       });
     } catch {
@@ -297,40 +324,37 @@ export default function ThemeControls({ theme, setTheme, reflowAvailable, onClos
           </div>
 
           <div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-              <label style={{ fontSize: 12, color: "var(--on-surface-variant)" }}>Font Size</label>
-              <span style={{ fontSize: 12, fontWeight: 600, color: "var(--primary)" }}>{theme.fontSize}px</span>
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span className="text-muted" style={{ fontSize: 13 }}>A</span>
-              <input
-                type="range"
-                min={14}
-                max={32}
-                value={theme.fontSize}
-                onChange={(e) => applyTheme({ fontSize: Number(e.target.value) })}
-                style={{ flex: 1 }}
-              />
-              <span className="text-muted" style={{ fontSize: 20 }}>A</span>
-            </div>
-          </div>
-
-          <div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-              <label style={{ fontSize: 12, color: "var(--on-surface-variant)" }}>Line Spacing</label>
-              <span style={{ fontSize: 12, fontWeight: 600, color: "var(--primary)" }}>{theme.lineSpacing.toFixed(1)}</span>
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span className="icon text-muted" style={{ fontSize: 16 }}>format_line_spacing</span>
-              <input
-                type="range"
-                min={1}
-                max={2.5}
-                step={0.1}
-                value={theme.lineSpacing}
-                onChange={(e) => applyTheme({ lineSpacing: Number(e.target.value) })}
-                style={{ flex: 1 }}
-              />
+            <label style={{ fontSize: 12, color: "var(--on-surface-variant)", display: "block", marginBottom: 8 }}>
+              Page Zoom
+            </label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {ZOOM_PRESETS.map((p) => {
+                const active = zoomIsActive(theme, p);
+                const isPct = typeof p.value === "number";
+                return (
+                  <button
+                    key={p.label}
+                    onClick={() => applyTheme({ zoom: p.value })}
+                    style={{
+                      flex: isPct ? "1 1 30%" : "1 1 100%",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 6,
+                      padding: "7px 8px",
+                      borderRadius: 6,
+                      border: active ? "2px solid var(--primary)" : "1px solid var(--outline-variant)",
+                      background: active ? "rgba(21,66,18,0.06)" : "transparent",
+                      color: active ? "var(--primary)" : "var(--on-surface-variant)",
+                      fontWeight: active ? 600 : 500,
+                      fontSize: 12,
+                    }}
+                  >
+                    {p.icon && <span className="icon" style={{ fontSize: 14 }}>{p.icon}</span>}
+                    {p.label}
+                  </button>
+                );
+              })}
             </div>
           </div>
         </section>
@@ -338,7 +362,7 @@ export default function ThemeControls({ theme, setTheme, reflowAvailable, onClos
         {/* Layout */}
         <section style={{ display: "flex", flexDirection: "column", gap: 20, borderTop: "1px solid var(--surface-variant)", paddingTop: 24 }}>
           <div>
-            <label style={{ fontSize: 12, color: "var(--on-surface-variant)", display: "block", marginBottom: 10 }}>Margins</label>
+            <label style={{ fontSize: 12, color: "var(--on-surface-variant)", display: "block", marginBottom: 8 }}>Page Margins</label>
             <div style={{ display: "flex", gap: 8 }}>
               {MARGIN_OPTIONS.map((m) => (
                 <button
@@ -403,20 +427,20 @@ export default function ThemeControls({ theme, setTheme, reflowAvailable, onClos
             <label style={{ fontSize: 12, color: "var(--on-surface-variant)", display: "block", marginBottom: 8 }}>Page Layout</label>
             <div style={{ display: "flex", background: "var(--surface-container-low)", borderRadius: 8, padding: 4, border: "1px solid var(--outline-variant)" }}>
               {[
-                { id: "spread", label: "Two-page", icon: "auto_stories" },
-                { id: "single", label: "One-page", icon: "menu_book" },
-              ].map((pl) => (
+                { id: "single", label: "Single Page" },
+                { id: "spread", label: "Two Pages" },
+              ].map((layout) => (
                 <button
-                  key={pl.id}
-                  onClick={() => applyTheme({ pageLayout: pl.id })}
+                  key={layout.id}
+                  onClick={() => applyTheme({ pageLayout: layout.id })}
                   style={{
                     flex: 1,
                     padding: "8px 8px",
                     borderRadius: 6,
                     border: "none",
-                    background: theme.pageLayout === pl.id ? "var(--surface-container-lowest)" : "transparent",
-                    color: theme.pageLayout === pl.id ? "var(--primary)" : "var(--on-surface-variant)",
-                    fontWeight: theme.pageLayout === pl.id ? 600 : 500,
+                    background: theme.pageLayout === layout.id ? "var(--surface-container-lowest)" : "transparent",
+                    color: theme.pageLayout === layout.id ? "var(--primary)" : "var(--on-surface-variant)",
+                    fontWeight: theme.pageLayout === layout.id ? 600 : 500,
                     fontSize: 12,
                     display: "flex",
                     alignItems: "center",
@@ -424,8 +448,8 @@ export default function ThemeControls({ theme, setTheme, reflowAvailable, onClos
                     gap: 6,
                   }}
                 >
-                  <span className="icon" style={{ fontSize: 15 }}>{pl.icon}</span>
-                  {pl.label}
+                  <span className="icon" style={{ fontSize: 15 }}>{layout.id === "single" ? "description" : "auto_stories"}</span>
+                  {layout.label}
                 </button>
               ))}
             </div>

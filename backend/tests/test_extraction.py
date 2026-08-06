@@ -1,247 +1,213 @@
-from app.core.extraction.extractor import TextSpan, _split_two_up_spans
-from app.core.extraction.structure import (
-    Line,
-    filter_running_noise,
-    group_into_lines,
-    reconstruct_blocks,
-    reconstruct_blocks_from_lines,
-    score_reflow_confidence,
-    StructuredPage,
-    Block,
+import fitz
+import pytest
+from unittest import mock
+
+from app.core.extraction.extractor import (
+    TextRun,
+    extract_text_runs,
+    get_pdf_outline,
+    _rotate_point,
+    _rotated_dimensions,
+    _span_advance,
 )
-
-
-def make_span(text, y0, size=12.0, x0=0.0):
-    return TextSpan(text=text, x0=x0, y0=y0, x1=x0 + len(text) * 6, y1=y0 + size, font="Body", size=size, page_number=0)
-
-
-def test_reconstruct_blocks_detects_heading():
-    spans = [
-        make_span("Chapter One", y0=0, size=20.0),
-        make_span("It was a dark and stormy night,", y0=30, size=12.0),
-        make_span("the wind howled through the trees.", y0=44, size=12.0),
-    ]
-
-    blocks = reconstruct_blocks(spans)
-
-    assert blocks[0].kind == "heading"
-    assert blocks[0].text == "Chapter One"
-    assert blocks[1].kind == "paragraph"
-    assert "dark and stormy" in blocks[1].text
-
-
-def test_reflow_confidence_penalizes_scanned_pages():
-    page = StructuredPage(page_number=0, blocks=[])
-    clean_score = score_reflow_confidence([page], scanned_page_ratio=0.0)
-    scanned_score = score_reflow_confidence([page], scanned_page_ratio=1.0)
-
-    assert scanned_score <= clean_score
-
-
-def test_reflow_confidence_rewards_dense_text_and_outline():
-    # A single-column novel page has few blocks but lots of text -- the
-    # scorer must treat that as reflowable rather than penalizing it.
-    body = StructuredPage(
-        page_number=0,
-        blocks=[Block(kind="paragraph", text="word " * 400)],
-    )
-    no_outline = score_reflow_confidence([body], scanned_page_ratio=0.0)
-    with_outline = score_reflow_confidence([body], scanned_page_ratio=0.0, outline=[{"title": "Ch 1"}])
-
-    assert no_outline >= 0.5
-    assert with_outline > no_outline
-
-
-def _line(text, y0, y1=None, size=12.0):
-    return Line(
-        text=text,
-        y0=y0,
-        y1=y1 if y1 is not None else y0 + 14.0,
-        x0=0.0,
-        x1=len(text) * 6,
-        avg_size=size,
-        page_number=0,
-    )
-
-
-def test_group_into_lines_merges_jittered_word_spans():
-    # Word-exported PDFs split one visual line into many spans whose baselines
-    # jitter by a few points -- they must still be grouped into a single line.
-    spans = [
-        TextSpan(text="Hello", x0=0.0, y0=100.0, x1=30.0, y1=112.0, font="Body", size=12.0, page_number=0),
-        TextSpan(text="cruel", x0=35.0, y0=101.5, x1=65.0, y1=113.5, font="Body", size=12.0, page_number=0),
-        TextSpan(text="world", x0=70.0, y0=100.8, x1=105.0, y1=112.8, font="Body", size=12.0, page_number=0),
-        TextSpan(text="Next", x0=0.0, y0=120.0, x1=30.0, y1=132.0, font="Body", size=12.0, page_number=0),
-    ]
-
-    lines = group_into_lines(spans)
-
-    assert len(lines) == 2
-    assert lines[0].text == "Hello cruel world"
-    assert lines[1].text == "Next"
-
-
-def test_filter_running_noise_removes_headers_and_page_numbers():
-    # Simulate 10 pages, each with a repeating header "David Copperfield", a
-    # footer page number "42", and one line of real body text.
-    page_heights = [800.0] * 10
-    pages = []
-    for i in range(10):
-        pages.append([
-            _line("David Copperfield", 20.0),
-            _line("42", 40.0),
-            _line(f"Body text line {i}", 400.0),
-        ])
-
-    filtered = filter_running_noise(pages, page_heights)
-
-    # The running header and page number are gone; body text survives.
-    for i, page in enumerate(filtered):
-        texts = [l.text for l in page]
-        assert "David Copperfield" not in texts
-        assert "42" not in texts
-        assert f"Body text line {i}" in texts
-
-
-def test_reconstruct_blocks_from_lines_splits_paragraphs():
-    # Realistic 12pt body text: line pitch ~14pt, inter-line gaps ~2pt.
-    # The paragraph break has a clearly larger gap.
-    lines = [
-        _line("Chapter One", 0.0, y1=20.0, size=20.0),
-        _line("It was a dark and stormy night,", 26.0, y1=38.0),
-        _line("the wind howled through the trees.", 40.0, y1=52.0),
-        _line("She walked for a long time.", 72.0, y1=84.0),  # gap 20 => new paragraph
-    ]
-
-    blocks = reconstruct_blocks_from_lines(lines)
-
-    assert blocks[0].kind == "heading"
-    assert blocks[0].text == "Chapter One"
-    assert blocks[1].kind == "paragraph"
-    assert "stormy" in blocks[1].text
-    assert blocks[2].kind == "paragraph"
-    assert blocks[2].text == "She walked for a long time."
-
-
-def _two_up_span(text, x0, y0, size=12.0):
-    return TextSpan(
-        text=text,
-        x0=x0,
-        y0=y0,
-        x1=x0 + len(text) * 6,
-        y1=y0 + size,
-        font="Body",
-        size=size,
-        page_number=0,
-    )
-
-
-def test_two_up_split_separates_left_and_right_columns():
-    # 612pt-wide sheet with a full left column (x 65-300) and full right
-    # column (x 315-556), matching baselines -- a classic spread layout.
-    spans = []
-    for i in range(10):
-        spans.append(_two_up_span(f"left line {i}", 65.0, 30 + i * 14))
-        spans.append(_two_up_span(f"right line {i}", 320.0, 30 + i * 14))
-
-    halves = _split_two_up_spans(spans, 612.0)
-
-    assert halves is not None
-    left, right = halves
-    assert all(s.x1 <= 306 for s in left)
-    assert all(s.x0 >= 306 for s in right)
-    assert len(left) == 10
-    assert len(right) == 10
-
-
-def test_two_up_split_keeps_centered_chapter_head_with_left_column():
-    # A spread whose left half opens a chapter: the centered title straddles
-    # the center line but must stay with the left column (its body text), not
-    # leak into the right page.
-    spans = []
-    for i in range(10):
-        spans.append(_two_up_span(f"left line {i}", 65.0, 90 + i * 14))
-        spans.append(_two_up_span(f"right line {i}", 320.0, 90 + i * 14))
-    spans.append(_two_up_span("CHAPTER I.", 270.0, 50.0, size=20.0))
-
-    halves = _split_two_up_spans(spans, 612.0)
-
-    assert halves is not None
-    left, right = halves
-    assert any(s.text == "CHAPTER I." for s in left)
-    assert not any(s.text == "CHAPTER I." for s in right)
-
-
-def test_two_up_split_keeps_fragmented_centered_title_together():
-    # PDFs fragment a spread-wide book title into many tiny spans whose
-    # horizontal centers fall on both sides of the gutter. The whole line must
-    # stay on one side so the title doesn't break across the two halves.
-    spans = []
-    for i in range(10):
-        spans.append(_two_up_span(f"left line {i}", 65.0, 90 + i * 14))
-        spans.append(_two_up_span(f"right line {i}", 320.0, 90 + i * 14))
-    fragments = ["M", "r", ". S", "herlock", "H", "olmes"]
-    x = 247.0
-    for frag in fragments:
-        spans.append(_two_up_span(frag, x, 50.0, size=20.0))
-        x += len(frag) * 6
-
-    halves = _split_two_up_spans(spans, 612.0)
-
-    assert halves is not None
-    left, right = halves
-    left_text = "".join(s.text for s in left).replace(" ", "")
-    right_text = "".join(s.text for s in right).replace(" ", "")
-    assert "Mr.SherlockHolmes" in left_text
-    assert "Mr.SherlockHolmes" not in right_text
-
-
-def test_two_up_split_rejects_single_full_width_page():
-    # A normal book page is justified across the full width, so nearly every
-    # span crosses the center line -- that must NOT be split.
-    spans = [_two_up_span(f"line {i}", 65.0, 30 + i * 14, size=12.0) for i in range(12)]
-    spans = [TextSpan(text=s.text, x0=65.0, y0=s.y0, x1=550.0, y1=s.y1, font="Body", size=12.0, page_number=0) for s in spans]
-
-    assert _split_two_up_spans(spans, 612.0) is None
-
-
-def test_two_up_split_rejects_centered_title_page():
-    # A title page is centered around the middle of the sheet, not split into
-    # two columns.
-    spans = [_two_up_span("A Study in Scarlet", 250.0, 50.0, size=20.0)]
-    spans.append(_two_up_span("by Arthur Conan Doyle", 240.0, 80.0, size=14.0))
-
-    assert _split_two_up_spans(spans, 612.0) is None
-
-
-# --------------------------------------------------------------------------
-# Native PDF annotation import
-# --------------------------------------------------------------------------
-
 from app.core.extraction.annotations import reconcile_native_annotations
-from app.core.extraction.extractor import NativeAnnotation, PageExtraction
+from app.core.extraction.coverage import text_coverage
+from app.core.extraction.pipeline import run_pipeline
 
 
-def _annot_page(spans, raw_annots):
+@pytest.fixture
+def two_page_pdf(tmp_path):
+    """One page with real text, one blank page (stands in for a scan)."""
+    path = tmp_path / "book.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 96), "David Copperfield", fontsize=20)
+    page.insert_text((72, 140), "It was the best of times.", fontsize=12)
+    doc.new_page(width=612, height=792)
+    doc.set_toc([[1, "Chapter One", 1]])
+    doc.save(path)
+    doc.close()
+    return str(path)
+
+
+@pytest.fixture
+def image_pdf(tmp_path):
+    """A page with real text and one embedded raster image."""
+    path = tmp_path / "illustrated.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 96), "Caption text", fontsize=12)
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 120, 80), False)
+    pix.clear_with(0)  # solid black
+    page.insert_image(fitz.Rect(200, 300, 320, 380), pixmap=pix)
+    doc.save(path)
+    doc.close()
+    return str(path)
+
+
+# ---------------------------------------------------------------------------
+# Positioned-run extraction
+# ---------------------------------------------------------------------------
+
+
+def test_extract_text_runs_physical_pages_and_run_geometry(two_page_pdf):
+    pages = extract_text_runs(two_page_pdf)
+
+    # Physical pages: the two-column spread PDF is NOT split into logical pages.
+    assert len(pages) == 2
+    assert pages[0].page_index == 0
+    assert pages[1].page_index == 1
+
+    assert pages[0].has_text_layer is True
+    assert pages[1].has_text_layer is False  # blank page -> OCR candidate
+
+    assert pages[0].width == 612.0
+    assert pages[0].height == 792.0
+
+    runs = pages[0].runs
+    assert runs, "expected text runs on page 0"
+    joined = " ".join(r.text for r in runs)
+    assert "David Copperfield" in joined
+
+    for r in runs:
+        assert r.x >= 0 and r.y >= 0
+        assert r.font_size > 0
+        assert r.advance > 0
+        assert r.font
+        assert r.page_index == 0
+
+
+def test_extract_page_images_finds_embedded_raster(image_pdf):
+    pages = extract_text_runs(image_pdf)
+
+    assert len(pages) == 1
+    page = pages[0]
+    assert page.width == 612.0 and page.height == 792.0
+
+    assert len(page.images) == 1
+    img = page.images[0]
+    # Placed at Rect(200, 300, 320, 380) unrotated; rotation 0 -> identity.
+    assert img.x0 == pytest.approx(200.0, abs=0.1)
+    assert img.y0 == pytest.approx(300.0, abs=0.1)
+    assert img.x1 == pytest.approx(320.0, abs=0.1)
+    assert img.y1 == pytest.approx(380.0, abs=0.1)
+    assert img.data, "image bytes must be extracted"
+    assert img.ext in ("png", "jpg")
+
+    # Decode the stored bytes back into an image with the same aspect ratio
+    # (JPEG encoding may round dimensions down to DCT block multiples).
+    with fitz.open(stream=img.data, filetype=img.ext) as imgsrc:
+        pix = imgsrc[0].get_pixmap()
+        assert pix.width / pix.height == pytest.approx(120 / 80, rel=0.05)
+
+
+def test_pipeline_emits_images_when_uploader_passed(image_pdf):
+    uploaded = []
+
+    def fake_uploader(data: bytes, ext: str) -> str:
+        uploaded.append(ext)
+        return f"images/owner/{len(uploaded)}.{ext}"
+
+    result = run_pipeline(image_pdf, image_uploader=fake_uploader)
+
+    assert len(result["pages"]) == 1
+    page = result["pages"][0]
+    assert len(page["images"]) == 1
+    img = page["images"][0]
+    assert img["key"].startswith("images/owner/")
+    assert img["x"] == pytest.approx(200.0, abs=0.1)
+    assert img["y"] == pytest.approx(300.0, abs=0.1)
+    assert img["w"] == pytest.approx(120.0, abs=0.1)
+    assert img["h"] == pytest.approx(80.0, abs=0.1)
+    assert uploaded == [img["key"].rsplit(".", 1)[1]]
+
+
+def test_pipeline_omits_image_keys_without_uploader(image_pdf):
+    result = run_pipeline(image_pdf)
+    assert len(result["pages"][0]["images"]) == 1
+    assert result["pages"][0]["images"][0]["key"] is None
+
+
+def test_two_up_spread_is_not_split(tmp_path):
+    """A two-column spread stays ONE physical page (no logical splitting)."""
+    path = tmp_path / "spread.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=800, height=600)
+    for i in range(10):
+        page.insert_text((80, 100 + i * 24), f"left line {i}", fontsize=12)
+        page.insert_text((460, 100 + i * 24), f"right line {i}", fontsize=12)
+    doc.save(path)
+    doc.close()
+
+    pages = extract_text_runs(path)
+    assert len(pages) == 1
+    assert pages[0].width == 800.0
+    assert len(pages[0].runs) == 20
+
+
+def test_rotation_transform():
+    assert _rotated_dimensions(612, 792, 0) == (612, 792)
+    assert _rotated_dimensions(612, 792, 90) == (792, 612)
+    assert _rotated_dimensions(612, 792, 270) == (792, 612)
+    assert _rotated_dimensions(612, 792, 180) == (612, 792)
+
+    # 90 deg clockwise: a point at the top-left stays top-left of display space.
+    assert _rotate_point(0, 0, 612, 792, 90) == (792, 0)
+    assert _rotate_point(72, 96, 612, 792, 90) == (792 - 96, 72)
+    # 180 deg: flips both axes.
+    assert _rotate_point(72, 96, 612, 792, 180) == (612 - 72, 792 - 96)
+
+
+def test_span_advance_sums_char_pen_positions():
+    chars = [
+        {"c": "a", "origin": [72.0, 96.0], "bbox": [72.0, 88.0, 79.0, 96.0]},
+        {"c": "b", "origin": [79.0, 96.0], "bbox": [79.0, 88.0, 86.0, 96.0]},
+        {"c": "c", "origin": [86.0, 96.0], "bbox": [86.0, 88.0, 93.0, 96.0]},
+    ]
+    assert _span_advance({"chars": chars}) == pytest.approx(21.0)  # 7 + 7 + 7
+
+
+def test_text_coverage():
+    assert text_coverage(3, 4) == 0.75
+    assert text_coverage(0, 4) == 0.0
+    assert text_coverage(4, 4) == 1.0
+    assert text_coverage(1, 0) == 0.0
+
+
+def test_get_pdf_outline_uses_zero_based_pages(two_page_pdf):
+    outline = get_pdf_outline(two_page_pdf)
+    assert outline == [{"level": 1, "title": "Chapter One", "page": 0}]
+
+
+# ---------------------------------------------------------------------------
+# Native PDF annotation import (char-range anchors)
+# ---------------------------------------------------------------------------
+
+
+def _page(runs, annots):
+    from app.core.extraction.extractor import PageExtraction, NativeAnnotation
+
     return PageExtraction(
-        page_number=0,
-        spans=spans,
+        page_index=0,
+        runs=[TextRun(text=t, x=x, y=y, font_size=fs, advance=w, font="Body", page_index=0) for t, x, y, fs, w in runs],
         has_text_layer=True,
-        page_width=612.0,
-        page_height=792.0,
-        native_annotations=raw_annots,
+        width=612.0,
+        height=792.0,
+        native_annotations=annots,
     )
 
 
-def test_native_highlight_is_anchored_by_matched_text():
-    spans = [
-        make_span("The quick brown fox", y0=30.0, x0=50.0),
-        make_span("jumps over the lazy dog.", y0=44.0, x0=50.0),
-        make_span("An untouched following line.", y0=58.0, x0=50.0),
-    ]
-    # Rectangle covering the first two lines.
-    annot = NativeAnnotation(x0=48.0, y0=28.0, x1=380.0, y1=55.0, kind="highlight", color=(1.0, 0.8, 0.2))
-    page = _annot_page(spans, [annot])
+def test_native_highlight_anchored_by_char_range():
+    from app.core.extraction.extractor import NativeAnnotation
+
+    page = _page(
+        runs=[
+            ("The quick brown fox", 50.0, 40.0, 12.0, 150.0),
+            ("jumps over the lazy dog.", 50.0, 54.0, 12.0, 180.0),
+            ("An untouched following line.", 50.0, 68.0, 12.0, 190.0),
+        ],
+        annots=[NativeAnnotation(x0=48.0, y0=28.0, x1=380.0, y1=54.0, kind="highlight", color=(1.0, 0.8, 0.2))],
+    )
 
     result = reconcile_native_annotations([page])
 
@@ -251,16 +217,18 @@ def test_native_highlight_is_anchored_by_matched_text():
     assert ann["color"] == "#FFCC33"
     assert ann["page"] == 0
     assert ann["text"] == "The quick brown fox jumps over the lazy dog."
-    # Surrounding context picks up the following line so repeated phrases are
-    # disambiguated.
+    assert ann["anchor"]["start_char"] == 0
+    assert ann["anchor"]["end_char"] == len("The quick brown fox" + "jumps over the lazy dog.")
     assert "An untouched following line." in ann["anchor"]["context_after"]
 
 
 def test_native_note_without_overlap_falls_back_to_page_anchor():
-    spans = [make_span("Just body text here.", y0=30.0, x0=50.0)]
-    # A margin note whose rectangle covers no text at all.
-    annot = NativeAnnotation(x0=560.0, y0=80.0, x1=590.0, y1=110.0, kind="note", note_text="Margin thought")
-    page = _annot_page(spans, [annot])
+    from app.core.extraction.extractor import NativeAnnotation
+
+    page = _page(
+        runs=[("Just body text here.", 50.0, 40.0, 12.0, 150.0)],
+        annots=[NativeAnnotation(x0=560.0, y0=80.0, x1=590.0, y1=110.0, kind="note", note_text="Margin thought")],
+    )
 
     result = reconcile_native_annotations([page])
 
@@ -269,4 +237,58 @@ def test_native_note_without_overlap_falls_back_to_page_anchor():
     assert result[0]["text"] == ""
     assert result[0]["note"] == "Margin thought"
     assert result[0]["anchor"]["page"] == 0
+    assert result[0]["anchor"]["start_char"] is None
 
+
+# ---------------------------------------------------------------------------
+# Pipeline end to end
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_schema_and_coverage(two_page_pdf):
+    result = run_pipeline(two_page_pdf)
+
+    assert result["schema"] == "textlayer-v1"
+    assert result["outline"] == [{"level": 1, "title": "Chapter One", "page": 0}]
+    assert result["text_confidence"] == 0.5  # 1 of 2 pages has text
+    assert result["reflow_confidence"] == 0.5
+    # At exactly 50% coverage the book is still "half text" -> not a scan, and
+    # the text layer is recommended.
+    assert result["is_scanned"] is False
+    assert result["reflow_mode_recommended"] is True
+
+    assert len(result["pages"]) == 2
+    p0 = result["pages"][0]
+    assert p0["page"] == 0 and p0["width"] == 612.0 and p0["height"] == 792.0
+    assert any("David Copperfield" in r["t"] for r in p0["runs"])
+    for r in p0["runs"]:
+        assert set(("t", "x", "y", "fs", "w", "f", "flags")) <= set(r.keys())
+
+
+def test_pipeline_ocr_fallback_fills_blank_page(two_page_pdf):
+    from app.core.extraction.extractor import TextRun
+
+    def fake_ocr(pdf_path, page_number):
+        assert page_number == 1
+        return [TextRun(text="Scanned line one", x=50.0, y=60.0, font_size=24.0, advance=120.0, font="ocr", page_index=1)], 0.9
+
+    with mock.patch("app.core.extraction.ocr.ocr_page", side_effect=fake_ocr):
+        result = run_pipeline(two_page_pdf)
+
+    assert len(result["pages"]) == 2
+    ocr_page = result["pages"][1]
+    assert any("Scanned line one" in r["t"] for r in ocr_page["runs"])
+    # Both pages now render text -> full coverage.
+    assert result["text_confidence"] == 1.0
+    assert result["is_scanned"] is False
+
+
+def test_pipeline_low_confidence_ocr_is_dropped(two_page_pdf):
+    def fake_ocr(pdf_path, page_number):
+        return [TextRun(text="Garbage", x=0.0, y=0.0, font_size=12.0, advance=10.0, font="ocr", page_index=1)], 0.2
+
+    with mock.patch("app.core.extraction.ocr.ocr_page", side_effect=fake_ocr):
+        result = run_pipeline(two_page_pdf)
+
+    assert result["pages"][1]["runs"] == []
+    assert result["text_confidence"] == 0.5
