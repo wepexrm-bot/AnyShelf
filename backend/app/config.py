@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     # OCR
     ocr_confidence_threshold: float = 0.65  # below this, fall back to fixed-layout mode
     use_cloud_ocr: bool = False  # False = Tesseract locally, True = cloud OCR API
+    ocr_dpi: int = 200  # render DPI for OCR'd pages; 300 is ~2x slower with little gain
+    ocr_timeout: int = 60  # per-page Tesseract timeout (seconds); 0 = no timeout
 
     @field_validator(
         "s3_endpoint_url",

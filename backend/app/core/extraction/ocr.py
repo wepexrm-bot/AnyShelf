@@ -18,19 +18,28 @@ from app.config import settings
 logger = logging.getLogger("cloudread.ocr")
 
 
-def render_page_to_image(pdf_path: str, page_number: int, dpi: int = 300) -> Image.Image:
-    doc = fitz.open(pdf_path)
-    page = doc[page_number]
-    zoom = dpi / 72
-    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
-    img = Image.open(io.BytesIO(pix.tobytes("png")))
-    doc.close()
-    return img
+def render_page_to_image(
+    pdf_path: str,
+    page_number: int,
+    dpi: int | None = None,
+    doc: fitz.Document | None = None,
+) -> Image.Image:
+    dpi = dpi or settings.ocr_dpi
+    own_doc = doc is None
+    doc = doc or fitz.open(pdf_path)
+    try:
+        page = doc[page_number]
+        zoom = dpi / 72
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+    finally:
+        if own_doc:
+            doc.close()
+    return Image.open(io.BytesIO(pix.tobytes("png")))
 
 
-def ocr_page(pdf_path: str, page_number: int) -> tuple[list[TextRun], float]:
+def ocr_page(pdf_path: str, page_number: int, doc: fitz.Document | None = None) -> tuple[list[TextRun], float]:
     """Run OCR on a single page. Returns (runs, avg_confidence 0-1)."""
-    image = render_page_to_image(pdf_path, page_number)
+    image = render_page_to_image(pdf_path, page_number, doc=doc)
 
     if settings.use_cloud_ocr:
         # Placeholder: swap in Google Cloud Vision / AWS Textract here for
@@ -39,7 +48,11 @@ def ocr_page(pdf_path: str, page_number: int) -> tuple[list[TextRun], float]:
         raise NotImplementedError("Wire up a cloud OCR provider here")
 
     try:
-        data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+        data = pytesseract.image_to_data(
+            image,
+            output_type=pytesseract.Output.DICT,
+            timeout=settings.ocr_timeout or None,
+        )
     except Exception as exc:
         # Tesseract not installed / not on PATH. Don't fail the whole book:
         # pages without a text layer just contribute no OCR content instead

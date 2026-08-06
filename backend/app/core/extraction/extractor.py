@@ -204,7 +204,7 @@ def _extract_native_annotations(page: fitz.Page, width: float, height: float, ro
     return raw_annots
 
 
-def extract_text_runs(pdf_path: str, progress_cb=None) -> list[PageExtraction]:
+def extract_text_runs(pdf_path: str, progress_cb=None, doc: fitz.Document | None = None) -> list[PageExtraction]:
     """Extract positioned text runs from every physical page of a PDF.
 
     Runs come from PyMuPDF's ``rawdict`` extraction (which yields character
@@ -213,72 +213,83 @@ def extract_text_runs(pdf_path: str, progress_cb=None) -> list[PageExtraction]:
     OCR them.
 
     ``progress_cb`` (if given) is called after each page with a fraction
-    (0.0-1.0) of the document completed.
+    (0.0-1.0) of the document completed. ``doc`` is an already-open document to
+    reuse (avoids re-parsing the file); when omitted the PDF is opened and
+    closed here.
     """
-    doc = fitz.open(pdf_path)
-    pages: list[PageExtraction] = []
-    total = doc.page_count
+    own_doc = doc is None
+    doc = doc or fitz.open(pdf_path)
+    try:
+        pages: list[PageExtraction] = []
+        total = doc.page_count
 
-    for page_index, page in enumerate(doc):
-        rotation = page.rotation or 0
-        base_w, base_h = page.rect.width, page.rect.height
-        disp_w, disp_h = _rotated_dimensions(base_w, base_h, rotation)
-        raw = page.get_text("rawdict")
-        runs: list[TextRun] = []
+        for page_index, page in enumerate(doc):
+            rotation = page.rotation or 0
+            base_w, base_h = page.rect.width, page.rect.height
+            disp_w, disp_h = _rotated_dimensions(base_w, base_h, rotation)
+            raw = page.get_text("rawdict")
+            runs: list[TextRun] = []
 
-        for block in raw.get("blocks", []):
-            for line in block.get("lines", []):
-                for span in line.get("spans", []):
-                    # rawdict spans don't carry an aggregated "text" key; the
-                    # text is the concatenation of their character dicts.
-                    text = "".join(c.get("c", "") for c in span.get("chars", [])).strip()
-                    if not text:
-                        continue
-                    origin = span.get("origin") or (0.0, 0.0)
-                    x, y = _rotate_point(origin[0], origin[1], base_w, base_h, rotation)
-                    runs.append(
-                        TextRun(
-                            text=text,
-                            x=x,
-                            y=y,
-                            font_size=span.get("size", 0.0),
-                            advance=_span_advance(span),
-                            font=span.get("font", ""),
-                            flags=span.get("flags", 0),
-                            page_index=page_index,
+            for block in raw.get("blocks", []):
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        # rawdict spans don't carry an aggregated "text" key; the
+                        # text is the concatenation of their character dicts.
+                        text = "".join(c.get("c", "") for c in span.get("chars", [])).strip()
+                        if not text:
+                            continue
+                        origin = span.get("origin") or (0.0, 0.0)
+                        x, y = _rotate_point(origin[0], origin[1], base_w, base_h, rotation)
+                        runs.append(
+                            TextRun(
+                                text=text,
+                                x=x,
+                                y=y,
+                                font_size=span.get("size", 0.0),
+                                advance=_span_advance(span),
+                                font=span.get("font", ""),
+                                flags=span.get("flags", 0),
+                                page_index=page_index,
+                            )
                         )
-                    )
 
-        total_chars = sum(len(r.text) for r in runs)
-        has_text_layer = total_chars > 15
+            total_chars = sum(len(r.text) for r in runs)
+            has_text_layer = total_chars > 15
 
-        pages.append(
-            PageExtraction(
-                page_index=page_index,
-                runs=runs,
-                has_text_layer=has_text_layer,
-                width=disp_w,
-                height=disp_h,
-                rotation=rotation,
-                native_annotations=_extract_native_annotations(page, base_w, base_h, rotation),
-                images=_extract_page_images(page, base_w, base_h, rotation),
+            pages.append(
+                PageExtraction(
+                    page_index=page_index,
+                    runs=runs,
+                    has_text_layer=has_text_layer,
+                    width=disp_w,
+                    height=disp_h,
+                    rotation=rotation,
+                    native_annotations=_extract_native_annotations(page, base_w, base_h, rotation),
+                    images=_extract_page_images(page, base_w, base_h, rotation),
+                )
             )
-        )
 
-        if progress_cb:
-            progress_cb((page_index + 1) / total)
-
-    doc.close()
+            if progress_cb:
+                progress_cb((page_index + 1) / total)
+    finally:
+        if own_doc:
+            doc.close()
     return pages
 
 
-def get_pdf_outline(pdf_path: str) -> list[dict]:
+def get_pdf_outline(pdf_path: str, doc: fitz.Document | None = None) -> list[dict]:
     """Pull the PDF's built-in bookmarks/outline, if present -- a free,
     reliable source of chapter/heading structure when available.
 
     Pages are 0-based (matching ``pages[].page`` in the text-layer JSON).
+    ``doc`` is an already-open document to reuse; when omitted the PDF is
+    opened and closed here.
     """
-    doc = fitz.open(pdf_path)
-    toc = doc.get_toc()  # [[level, title, page_number(1-based)], ...]
-    doc.close()
+    own_doc = doc is None
+    doc = doc or fitz.open(pdf_path)
+    try:
+        toc = doc.get_toc()  # [[level, title, page_number(1-based)], ...]
+    finally:
+        if own_doc:
+            doc.close()
     return [{"level": lvl, "title": title, "page": page - 1} for lvl, title, page in toc]

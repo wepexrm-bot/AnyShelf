@@ -134,10 +134,17 @@ def process_extraction(book_id: str, local_pdf_path: str):
             return
 
         book.extraction_status = "processing"
+        book.extraction_progress = 0
         db.commit()
 
         def set_progress(fraction: float):
-            _extraction_progress[book_id] = int(round(fraction * 100))
+            pct = int(round(fraction * 100))
+            _extraction_progress[book_id] = pct
+            # Persist every integer-percent change so progress survives a
+            # process recycle (Render free tier can sleep/restart mid-job).
+            if book.extraction_progress != pct:
+                book.extraction_progress = pct
+                db.commit()
 
         set_progress(0.01)
 
@@ -148,7 +155,16 @@ def process_extraction(book_id: str, local_pdf_path: str):
             upload_bytes(data, storage_key=key, content_type="image/jpeg" if ext == "jpg" else "image/png")
             return key
 
+        import time as _time
+        _job_started = _time.perf_counter()
         result = run_pipeline(local_pdf_path, progress_cb=set_progress, image_uploader=upload_page_image)
+        logger.info(
+            "Extraction finished for book %s in %.2fs: %d pages, images=%d",
+            book_id,
+            _time.perf_counter() - _job_started,
+            len(result["pages"]),
+            sum(len(p.get("images", [])) for p in result["pages"]),
+        )
         set_progress(1.0)
 
         structured_key = f"structured/{book.owner_id}/{book_id}.json"
@@ -285,7 +301,7 @@ def get_extraction_progress(
     elif status == "failed":
         progress = 0
     else:
-        progress = _extraction_progress.get(book_id, 0)
+        progress = _extraction_progress.get(book_id) or book.extraction_progress or 0
     return {"extraction_status": status, "progress": progress}
 
 
@@ -322,6 +338,7 @@ def re_extract_book(
     # Flip the status synchronously so an immediate /progress poll reports
     # "processing" instead of racing the background task's own flip.
     book.extraction_status = "processing"
+    book.extraction_progress = 0
     db.commit()
     background_tasks.add_task(process_extraction, book.id, tmp_path)
 

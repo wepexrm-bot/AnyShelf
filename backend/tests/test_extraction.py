@@ -122,6 +122,33 @@ def test_pipeline_emits_images_when_uploader_passed(image_pdf):
     assert uploaded == [img["key"].rsplit(".", 1)[1]]
 
 
+def test_pipeline_uploads_keep_image_order_under_concurrency(tmp_path):
+    """Parallel uploads must land back in the original page/image order."""
+    path = tmp_path / "multi.pdf"
+    doc = fitz.open()
+    for page_idx in range(2):
+        page = doc.new_page(width=612, height=792)
+        page.insert_text((72, 96), f"Page {page_idx} caption", fontsize=12)
+        pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 60, 40), False)
+        pix.clear_with(page_idx + 1)
+        page.insert_image(fitz.Rect(200, 300, 260, 340), pixmap=pix)
+    doc.save(path)
+    doc.close()
+
+    calls = []
+
+    def fake_uploader(data: bytes, ext: str) -> str:
+        calls.append(len(calls))
+        return f"images/owner/{len(calls)}.{ext}"
+
+    result = run_pipeline(str(path), image_uploader=fake_uploader)
+
+    keys = [img["key"] for p in result["pages"] for img in p["images"]]
+    assert len(keys) == 2
+    # Keys were assigned in call order, which must match image order.
+    assert keys == ["images/owner/1.png", "images/owner/2.png"]
+
+
 def test_pipeline_omits_image_keys_without_uploader(image_pdf):
     result = run_pipeline(image_pdf)
     assert len(result["pages"][0]["images"]) == 1
@@ -268,7 +295,7 @@ def test_pipeline_schema_and_coverage(two_page_pdf):
 def test_pipeline_ocr_fallback_fills_blank_page(two_page_pdf):
     from app.core.extraction.extractor import TextRun
 
-    def fake_ocr(pdf_path, page_number):
+    def fake_ocr(pdf_path, page_number, doc=None):
         assert page_number == 1
         return [TextRun(text="Scanned line one", x=50.0, y=60.0, font_size=24.0, advance=120.0, font="ocr", page_index=1)], 0.9
 
@@ -284,7 +311,7 @@ def test_pipeline_ocr_fallback_fills_blank_page(two_page_pdf):
 
 
 def test_pipeline_low_confidence_ocr_is_dropped(two_page_pdf):
-    def fake_ocr(pdf_path, page_number):
+    def fake_ocr(pdf_path, page_number, doc=None):
         return [TextRun(text="Garbage", x=0.0, y=0.0, font_size=12.0, advance=10.0, font="ocr", page_index=1)], 0.2
 
     with mock.patch("app.core.extraction.ocr.ocr_page", side_effect=fake_ocr):
