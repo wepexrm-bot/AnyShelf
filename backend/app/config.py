@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     s3_bucket: str = "cloudread-books"
     s3_region: str = "us-east-1"
     s3_endpoint_url: str | None = None  # set for MinIO/local dev
+    s3_public_url: str | None = None  # host clients can reach; presigned URLs are signed against this
     aws_access_key_id: str | None = None
     aws_secret_access_key: str | None = None
 

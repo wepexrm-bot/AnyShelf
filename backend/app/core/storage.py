@@ -26,6 +26,19 @@ _s3 = boto3.client(
     aws_secret_access_key=_r2_secret,
     config=Config(signature_version="s3v4"),
 )
+
+# A second client used only to sign presigned URLs against a host that clients
+# can actually reach (e.g. the LAN IP instead of localhost). The SigV4
+# signature covers the Host header, so signing with the private endpoint would
+# produce URLs that break as soon as a mobile app rewrites the host.
+_presign_s3 = boto3.client(
+    "s3",
+    region_name=settings.s3_region,
+    endpoint_url=settings.s3_public_url or settings.s3_endpoint_url,
+    aws_access_key_id=_r2_access,
+    aws_secret_access_key=_r2_secret,
+    config=Config(signature_version="s3v4"),
+)
 logger.warning(
     "S3 client initialized: bucket=%s region=%s endpoint=%s creds=%s",
     settings.s3_bucket,
@@ -56,7 +69,7 @@ def get_presigned_url(storage_key: str, expires_in: int = 3600, inline: bool = F
     params: dict = {"Bucket": settings.s3_bucket, "Key": storage_key}
     if inline:
         params["ResponseContentDisposition"] = "inline"
-    return _s3.generate_presigned_url(
+    return _presign_s3.generate_presigned_url(
         "get_object",
         Params=params,
         ExpiresIn=expires_in,

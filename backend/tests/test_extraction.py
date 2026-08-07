@@ -198,6 +198,10 @@ def test_pipeline_schema_and_coverage(two_page_pdf):
         assert set(("t", "x", "y", "fs", "w", "f", "flags")) <= set(r.keys())
     # Page images are no longer extracted; clients render the PDF itself.
     assert "images" not in p0
+    # Every page carries an image flag so clients keep real pages visible
+    # in text mode (covers/illustrations).
+    for p in result["pages"]:
+        assert "has_image" in p and isinstance(p["has_image"], bool)
 
 
 def test_pipeline_ocr_fallback_fills_blank_page(two_page_pdf):

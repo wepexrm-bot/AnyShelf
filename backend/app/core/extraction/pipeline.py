@@ -57,6 +57,7 @@ def run_pipeline(pdf_path: str, progress_cb=None) -> dict:
         pages_with_text = 0
 
         for page_index, page in enumerate(pages):
+            page.has_image = bool(doc.load_page(page_index).get_image_info())
             if not page.has_text_layer:
                 ocr_runs, ocr_confidence = ocr_page(pdf_path, page_index, doc=doc)
                 if ocr_confidence >= settings.ocr_confidence_threshold and ocr_runs:
@@ -90,6 +91,7 @@ def run_pipeline(pdf_path: str, progress_cb=None) -> dict:
                     "width": round(p.width, 2),
                     "height": round(p.height, 2),
                     "rotation": p.rotation,
+                    "has_image": p.has_image,
                     "runs": [
                         {
                             "t": r.text,

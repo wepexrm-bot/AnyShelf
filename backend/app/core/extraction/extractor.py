@@ -34,6 +34,7 @@ class PageExtraction:
     width: float = 0.0  # display-space page dimensions (rotation applied)
     height: float = 0.0
     rotation: int = 0
+    has_image: bool = False  # page renders at least one image (cover, illustration)
     # Native PDF annotations (highlights, underlines, margin notes) found on
     # this page, in display-space coordinates.
     native_annotations: list["NativeAnnotation"] = field(default_factory=list)
