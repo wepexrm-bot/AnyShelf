@@ -293,7 +293,7 @@ class _AboutCardState extends State<_AboutCard> {
         children: [
           const _SectionHeader(icon: Icons.info_outline, text: 'About'),
           const SizedBox(height: 16),
-          Text('CloudRead v$_version',
+          Text('AnyShelf v$_version',
               style: SereneType.uiBody.copyWith(color: colors.onSurface)),
           const SizedBox(height: 8),
           Text('© 2026 wepexrm-bot',

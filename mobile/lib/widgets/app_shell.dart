@@ -44,14 +44,19 @@ class _AppShellState extends State<AppShell> {
         MediaQuery.sizeOf(context).width >= SereneLayout.tabletBreakpoint;
 
     final pages = [
-      LibraryScreen(
-        onOpenBook: _openBook,
-        onGoToShelves: () => setState(() => _index = 2),
+      // Each destination is its own RepaintBoundary so the theme crossfade (and
+      // tab switches) only repaint the visible tab — the other four stay in
+      // their cached layers instead of re-compositing every animation frame.
+      RepaintBoundary(
+        child: LibraryScreen(
+          onOpenBook: _openBook,
+          onGoToShelves: () => setState(() => _index = 2),
+        ),
       ),
-      BooksScreen(onOpenBook: _openBook),
-      ShelvesScreen(onOpenBook: _openBook),
-      const StatsScreen(),
-      const SettingsScreen(),
+      RepaintBoundary(child: BooksScreen(onOpenBook: _openBook)),
+      RepaintBoundary(child: ShelvesScreen(onOpenBook: _openBook)),
+      const RepaintBoundary(child: StatsScreen()),
+      const RepaintBoundary(child: SettingsScreen()),
     ];
 
     if (isTablet) {

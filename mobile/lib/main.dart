@@ -71,6 +71,13 @@ Future<void> _warmApi() async {
   }
 }
 
+// The day/night ThemeData are built once (lazily, on first access) and reused,
+// so toggling light/dark never re-runs ColorScheme.fromSeed() / GoogleFont
+// resolution on the swap frame — that per-toggle hitch was a source of jank
+// during the theme transition.
+final ThemeData _dayTheme = sereneTheme(SereneColorScheme.day);
+final ThemeData _nightTheme = sereneTheme(SereneColorScheme.night);
+
 class CloudReadApp extends StatefulWidget {
   const CloudReadApp({super.key});
 
@@ -136,8 +143,14 @@ class _CloudReadAppState extends State<CloudReadApp> with WidgetsBindingObserver
           title: 'AnyShelf',
           debugShowCheckedModeBanner: false,
           navigatorKey: _navKey,
-          theme: sereneTheme(SereneColorScheme.day),
-          darkTheme: sereneTheme(SereneColorScheme.night),
+          theme: _dayTheme,
+          darkTheme: _nightTheme,
+          // A shorter-than-default crossfade: 200ms of per-frame ThemeData
+          // lerp across every Theme-dependent widget (all IndexedStack tabs
+          // stay alive) is what made the toggle feel sluggish; 120ms keeps the
+          // fade but drops ~40% of the interpolated frames.
+          themeAnimationDuration: const Duration(milliseconds: 120),
+          themeAnimationCurve: Curves.easeOutCubic,
           themeMode: _uiMode.mode,
           home: const _AuthGate(),
         ),

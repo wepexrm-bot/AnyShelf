@@ -238,7 +238,7 @@ class _MonthlyChart extends StatelessWidget {
               style: SereneType.labelSm.copyWith(color: colors.onSurfaceVariant, letterSpacing: 1)),
           const SizedBox(height: 16),
           SizedBox(
-            height: 120,
+            height: 132,
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
