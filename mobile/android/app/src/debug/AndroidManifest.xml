@@ -4,4 +4,8 @@
          to allow setting breakpoints, to provide hot reload, etc.
     -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Debug builds must talk plain HTTP to the local backend over the
+         adb reverse tunnel (http://127.0.0.1:8000). Android 9+ blocks
+         cleartext by default, so opt in for debug builds only. -->
+    <application android:usesCleartextTraffic="true" />
 </manifest>

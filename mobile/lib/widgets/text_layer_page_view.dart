@@ -152,9 +152,9 @@ class _TextLayerPageViewState extends State<TextLayerPageView> {
       widget.page.width <= 0 ? 1 : widget.renderWidth / widget.page.width;
 
   TextStyle _styleFor(TextRun r) {
-    final base = GoogleFonts.getFont(
+    final base = _resolveReaderFont(
       widget.settings.fontFamily,
-      textStyle: TextStyle(
+      TextStyle(
         fontSize: r.fs * _scale,
         color: widget.settings.atmosphere.text,
       ),
@@ -163,6 +163,17 @@ class _TextLayerPageViewState extends State<TextLayerPageView> {
       fontWeight: r.isBold ? FontWeight.w700 : FontWeight.w400,
       fontStyle: r.isItalic ? FontStyle.italic : FontStyle.normal,
     );
+  }
+
+  /// Resolves a reader font family without ever throwing: google_fonts is
+  /// missing a few families (e.g. OpenDyslexic), so an unknown one falls back
+  /// to the plain family name instead of breaking the page render.
+  static TextStyle _resolveReaderFont(String family, TextStyle base) {
+    try {
+      return GoogleFonts.getFont(family, textStyle: base);
+    } catch (_) {
+      return base.copyWith(fontFamily: family);
+    }
   }
 
   String _buildKey() {

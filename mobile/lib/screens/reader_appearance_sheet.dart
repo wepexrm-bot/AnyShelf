@@ -11,12 +11,10 @@ import '../theme/serene_tokens.dart';
 /// change is streamed out via [onChanged] so the reader behind updates live.
 class ReaderAppearanceSheet extends StatefulWidget {
   final ReaderSettings initial;
-  final bool reflowAvailable;
   final ValueChanged<ReaderSettings> onChanged;
   const ReaderAppearanceSheet({
     super.key,
     required this.initial,
-    required this.reflowAvailable,
     required this.onChanged,
   });
 
@@ -77,7 +75,6 @@ class _ReaderAppearanceSheetState extends State<ReaderAppearanceSheet> {
                 const SizedBox(height: 28),
                 _LayoutSection(
                   settings: _settings,
-                  reflowAvailable: widget.reflowAvailable,
                   onChanged: _update,
                 ),
               ],
@@ -276,60 +273,6 @@ class _TypographySection extends StatelessWidget {
             ),
           ),
         ),
-        const SizedBox(height: 12),
-        Row(
-          children: [
-            Expanded(
-              child: _LayoutButton(
-                active: settings.fitMode == FitMode.page,
-                icon: Icons.crop_free,
-                label: 'Fit Page',
-                onTap: () =>
-                    onChanged(settings.copyWith(fitMode: FitMode.page)),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: _LayoutButton(
-                active: settings.fitMode == FitMode.width,
-                icon: Icons.swap_horiz,
-                label: 'Fit Width',
-                onTap: () =>
-                    onChanged(settings.copyWith(fitMode: FitMode.width)),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 16),
-        _MiniPanel(
-          label: 'Margins',
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              _IconStep(
-                active: settings.margins == MarginLevel.small,
-                icon: Icons.splitscreen,
-                size: 18,
-                onTap: () =>
-                    onChanged(settings.copyWith(margins: MarginLevel.small)),
-              ),
-              _IconStep(
-                active: settings.margins == MarginLevel.medium,
-                icon: Icons.horizontal_distribute,
-                size: 18,
-                onTap: () => onChanged(
-                    settings.copyWith(margins: MarginLevel.medium)),
-              ),
-              _IconStep(
-                active: settings.margins == MarginLevel.large,
-                icon: Icons.width_normal,
-                size: 18,
-                onTap: () => onChanged(
-                    settings.copyWith(margins: MarginLevel.large)),
-              ),
-            ],
-          ),
-        ),
       ],
     );
   }
@@ -382,9 +325,8 @@ class _FontPicker extends StatelessWidget {
 }
 
 class _MiniPanel extends StatelessWidget {
-  final String? label;
   final Widget child;
-  const _MiniPanel({this.label, required this.child});
+  const _MiniPanel({required this.child});
 
   @override
   Widget build(BuildContext context) {
@@ -396,65 +338,16 @@ class _MiniPanel extends StatelessWidget {
         borderRadius: BorderRadius.all(SereneShape.xl),
         border: Border.all(color: colors.surfaceVariant),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (label != null) ...[
-            Text(label!,
-                style:
-                    SereneType.labelSm.copyWith(color: colors.onSurfaceVariant)),
-            const SizedBox(height: 12),
-          ],
-          child,
-        ],
-      ),
-    );
-  }
-}
-
-class _IconStep extends StatelessWidget {
-  final bool active;
-  final IconData icon;
-  final double size;
-  final VoidCallback onTap;
-  const _IconStep({
-    required this.active,
-    required this.icon,
-    required this.size,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = Theme.of(context).extension<SereneTheme>()!.colors;
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.all(6),
-        decoration: BoxDecoration(
-          color: active
-              ? colors.primary.withValues(alpha: 0.12)
-              : Colors.transparent,
-          borderRadius: BorderRadius.all(SereneShape.sm),
-        ),
-        child: Icon(
-          icon,
-          size: size,
-          color: active ? colors.primary : colors.onSurfaceVariant,
-        ),
-      ),
+      child: child,
     );
   }
 }
 
 class _LayoutSection extends StatelessWidget {
   final ReaderSettings settings;
-  final bool reflowAvailable;
   final ValueChanged<ReaderSettings> onChanged;
   const _LayoutSection({
     required this.settings,
-    required this.reflowAvailable,
     required this.onChanged,
   });
 
@@ -478,36 +371,11 @@ class _LayoutSection extends StatelessWidget {
             const SizedBox(width: 12),
             Expanded(
               child: _LayoutButton(
-                active: settings.mode == ReaderMode.paginated,
+                active: settings.mode == ReaderMode.singlePage,
                 icon: Icons.import_contacts,
-                label: 'Paginated',
-                enabled: reflowAvailable,
-                onTap: () =>
-                    onChanged(settings.copyWith(mode: ReaderMode.paginated)),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        Row(
-          children: [
-            Expanded(
-              child: _LayoutButton(
-                active: settings.layout == PageLayout.single,
-                icon: Icons.article,
                 label: 'Single page',
                 onTap: () =>
-                    onChanged(settings.copyWith(layout: PageLayout.single)),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: _LayoutButton(
-                active: settings.layout == PageLayout.spread,
-                icon: Icons.menu_book,
-                label: 'Spread',
-                onTap: () =>
-                    onChanged(settings.copyWith(layout: PageLayout.spread)),
+                    onChanged(settings.copyWith(mode: ReaderMode.singlePage)),
               ),
             ),
           ],
@@ -515,19 +383,12 @@ class _LayoutSection extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.only(top: 12),
           child: Text(
-            'Spread shows two facing pages side by side. It only applies in '
-            'paginated mode on tablets — phones always show a single page.',
+            'Scroll flows every page edge-to-edge continuously. Single page '
+            'shows one full page at a time — swipe left/right to turn, '
+            'double-tap to zoom, pinch to pan.',
             style: SereneType.labelSm.copyWith(color: colors.onSurfaceVariant),
           ),
         ),
-        if (!reflowAvailable)
-          Padding(
-            padding: const EdgeInsets.only(top: 12),
-            child: Text(
-              'Paginated layout needs reflow mode, which isn\'t available for this book.',
-              style: SereneType.labelSm.copyWith(color: colors.onSurfaceVariant),
-            ),
-          ),
       ],
     );
   }
@@ -535,7 +396,6 @@ class _LayoutSection extends StatelessWidget {
 
 class _LayoutButton extends StatelessWidget {
   final bool active;
-  final bool enabled;
   final IconData icon;
   final String label;
   final VoidCallback onTap;
@@ -543,20 +403,15 @@ class _LayoutButton extends StatelessWidget {
     required this.active,
     required this.icon,
     required this.label,
-    this.enabled = true,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).extension<SereneTheme>()!.colors;
-    final color = !enabled
-        ? colors.onSurfaceVariant.withValues(alpha: 0.4)
-        : active
-            ? colors.primary
-            : colors.onSurfaceVariant;
+    final color = active ? colors.primary : colors.onSurfaceVariant;
     return GestureDetector(
-      onTap: enabled ? onTap : null,
+      onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
         padding: const EdgeInsets.symmetric(vertical: 16),

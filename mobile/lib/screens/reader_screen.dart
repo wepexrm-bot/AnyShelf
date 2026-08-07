@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -232,7 +233,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
         if (!mounted) return;
         setState(() {
           _loading = false;
-          if (progress > 0 && _settings.mode == ReaderMode.paginated) {
+          _zoom = 1.0;
+          if (progress > 0 && _settings.mode == ReaderMode.singlePage) {
             _currentPage = _pageForFraction(progress);
           }
         });
@@ -251,7 +253,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
         if (!mounted) return;
         setState(() {
           _loading = false;
-          if (progress > 0 && _settings.mode == ReaderMode.paginated) {
+          _zoom = 1.0;
+          if (progress > 0 && _settings.mode == ReaderMode.singlePage) {
             _currentPage = _pageForFraction(progress);
           }
         });
@@ -334,12 +337,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
     setState(() {
       _settings = next;
       if (next.mode == ReaderMode.scroll) _restoreScrollOnShow = true;
+      if (modeChanged) _zoom = 1.0;
     });
-    // The page fit is local-only (not in the backend settings contract), so it
-    // is persisted through SharedPreferences like the text-mode toggle.
-    SharedPreferences.getInstance().then(
-      (prefs) => prefs.setString('reader_fit_mode', next.fitMode.apiId),
-    );
     _saveTimer?.cancel();
     _saveTimer = Timer(const Duration(milliseconds: 400), () {
       _pendingSettings = null;
@@ -515,17 +514,15 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final idx = page.clamp(0, math.max(0, _renderPages.length - 1)).toInt();
     setState(() => _currentPage = idx);
     _onPageShown(idx);
-    if (_settings.mode == ReaderMode.paginated) {
+    if (_settings.mode == ReaderMode.singlePage) {
       if (_paginateController?.hasClients ?? false) {
-        final spread = _spreadActive;
-        final target = spread ? idx ~/ 2 : idx;
         // Defer the actual jump to the end of the frame: jumpToPage fires
         // `onPageChanged` synchronously (a second setState), so running it
         // post-frame keeps that churn out of any in-progress element
         // deactivation the current frame is walking.
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted && (_paginateController?.hasClients ?? false)) {
-            _paginateController!.jumpToPage(target);
+            _paginateController!.jumpToPage(idx);
           }
         });
       }
@@ -538,27 +535,23 @@ class _ReaderScreenState extends State<ReaderScreen> {
     }
   }
 
-  /// Tablet-only double-page spread (web `page_layout: spread`). Phones always
-  /// get a single page regardless of the setting.
-  bool get _spreadActive =>
-      MediaQuery.sizeOf(context).shortestSide >= 600 &&
-      _settings.layout == PageLayout.spread;
-
   double get _fontSize => _settings.fontSize;
-  double get _readingInset => _clampReadingInset(MediaQuery.sizeOf(context).width);
 
-  double _clampReadingInset(double width) {
-    final factor = switch (_settings.margins) {
-      MarginLevel.small => 0.05,
-      MarginLevel.medium => 0.07,
-      MarginLevel.large => 0.1,
-    };
-    return (width * factor).clamp(16.0, 64.0);
+  /// Resolves a reader font family to a [TextStyle] without ever throwing:
+  /// google_fonts covers most families, but its bundled directory is missing a
+  /// few (e.g. OpenDyslexic), so an unknown family falls back to the plain
+  /// family name instead of blocking the book from opening.
+  static TextStyle _resolveReaderFont(String family, TextStyle base) {
+    try {
+      return GoogleFonts.getFont(family, textStyle: base);
+    } catch (_) {
+      return base.copyWith(fontFamily: family);
+    }
   }
 
-  TextStyle get _bodyStyle => GoogleFonts.getFont(
+  TextStyle get _bodyStyle => _resolveReaderFont(
         _settings.fontFamily,
-        textStyle: TextStyle(
+        TextStyle(
           fontSize: _fontSize,
           color: _settings.atmosphere.text,
         ),
@@ -566,84 +559,57 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   @override
   Widget build(BuildContext context) {
-    if (_loading) {
-      return Scaffold(
-        backgroundColor: _settings.atmosphere.background,
-        body: const Center(child: CircularProgressIndicator()),
-      );
-    }
-    if (_error != null) {
-      return Scaffold(
-        backgroundColor: _settings.atmosphere.background,
-        body: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text('Couldn\'t open this book',
-                    style: SereneType.title.copyWith(
-                        color: _settings.atmosphere.text)),
-                const SizedBox(height: 8),
-                Text('$_error',
-                    textAlign: TextAlign.center,
-                    style: SereneType.uiBody
-                        .copyWith(color: _settings.atmosphere.text)),
-                const SizedBox(height: 16),
-                FilledButton(onPressed: _load, child: const Text('Retry')),
-              ],
-            ),
-          ),
-        ),
-      );
-    }
-
+    final loading = _loading;
+    final error = _error;
+    // The keyed Stack stays mounted in every state (loading / error / reading)
+    // so the GlobalKey'd subtree is never deactivated and re-created, which
+    // trips the framework's GlobalKey retake machinery (see the framework.dart
+    // `_InactiveElements` assertion). Loading and error render as inner
+    // children; the chrome is hidden while they're shown.
     return Scaffold(
       backgroundColor: _settings.atmosphere.background,
       body: Stack(
         key: _readingKey,
         children: [
-          Positioned.fill(
-            child: Listener(
-              behavior: HitTestBehavior.translucent,
-              onPointerDown: _onPointerDown,
-              onPointerUp: _onPointerUp,
-              onPointerCancel: (_) => _tapDownPos = null,
-              child: _readingSurface(),
-            ),
-          ),
-          if (_highlightMenu != null) _buildHighlightMenu(),
-          _buildTopBar(),
-          _buildBottomBar(),
-          _buildGoToPagePanel(),
+          if (loading)
+            const Positioned.fill(
+              child: Center(child: CircularProgressIndicator()),
+            )
+          else if (error != null)
+            Positioned.fill(child: _errorView())
+          else ...[
+            Positioned.fill(child: _readingSurface()),
+            if (_highlightMenu != null) _buildHighlightMenu(),
+            _buildTopBar(),
+            _buildBottomBar(),
+            _buildGoToPagePanel(),
+          ],
         ],
       ),
     );
   }
 
-  // Raw pointer tap detection. The reading surface (especially the PDF viewer)
-  // claims normal tap gestures internally, so a GestureDetector on top would
-  // never see taps. A Listener sees every pointer event regardless, letting us
-  // toggle the chrome with a quick tap while still scrolling/pinching the book.
-  Offset? _tapDownPos;
-  DateTime _tapDownAt = DateTime.now();
-
-  void _onPointerDown(PointerDownEvent e) {
-    _tapDownPos = e.position;
-    _tapDownAt = DateTime.now();
-  }
-
-  void _onPointerUp(PointerUpEvent e) {
-    final down = _tapDownPos;
-    if (down == null) return;
-    _tapDownPos = null;
-    final moved = (e.position - down).distance > 14;
-    final quick = DateTime.now().difference(_tapDownAt) <
-        const Duration(milliseconds: 400);
-    // In paginated text-layer mode the page view owns taps (tap zones flip
-    // pages, the centre toggles chrome); everywhere else a quick tap toggles.
-    if (_textLayerAvailable && _settings.mode == ReaderMode.paginated) return;
-    if (!moved && quick) _toggleChrome();
+  Widget _errorView() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('Couldn\'t open this book',
+                style: SereneType.title.copyWith(
+                    color: _settings.atmosphere.text)),
+            const SizedBox(height: 8),
+            Text('$_error',
+                textAlign: TextAlign.center,
+                style: SereneType.uiBody
+                    .copyWith(color: _settings.atmosphere.text)),
+            const SizedBox(height: 16),
+            FilledButton(onPressed: _load, child: const Text('Retry')),
+          ],
+        ),
+      ),
+    );
   }
 
   void _toggleChrome() {
@@ -658,9 +624,65 @@ class _ReaderScreenState extends State<ReaderScreen> {
   Widget _readingSurface() {
     if (_isExtracting) return _extractionView();
     if (_renderPages.isEmpty) return _fixedPdfUnavailableView();
-    return _settings.mode == ReaderMode.scroll
-        ? _scrollView()
-        : _paginatedView();
+    // The base surface (scroll list / PageView) stays mounted at all times and
+    // the zoom overlay floats above it. Keeping the surface in a stable tree
+    // slot preserves its exact scroll/paginate position, so zooming in and out
+    // never lands on a different page. The overlay itself is also kept mounted
+    // (gated by IgnorePointer/Opacity) so its render object is always laid out
+    // and reliably receives gestures the moment zoom is entered.
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        _settings.mode == ReaderMode.scroll ? _scrollView() : _singlePageView(),
+        IgnorePointer(
+          ignoring: _zoom <= 1.0,
+          child: Opacity(
+            opacity: _zoom > 1.0 ? 1 : 0,
+            child: _zoomOverlay(),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Full-screen zoom overlay shared by scroll and single-page modes. The
+  /// current page is rendered at fit and scaled by a transform, so zooming
+  /// never reflows the list / PageView geometry — that's what stopped the
+  /// page-jump on double-tap. Pinch anchors at the focal point, one finger
+  /// roams, double-tap cycles 100→150→200→100, and on settle the page
+  /// re-renders once at the committed width for crisp text.
+  Widget _zoomOverlay() {
+    final pages = _renderPages;
+    final size = MediaQuery.sizeOf(context);
+    final scroll = _settings.mode == ReaderMode.scroll;
+    final idx = _currentPage.clamp(0, math.max(0, pages.length - 1)).toInt();
+    final page = pages[idx];
+    return _ZoomablePage(
+      key: ValueKey('zoom-$_anchorSeed-$idx'),
+      page: page,
+      pageIndex: idx,
+      fitWidth: scroll ? _scrollRenderWidth : _singlePageFitWidth(page, size),
+      settings: _settings,
+      paper: _paperFor(_settings.atmosphere),
+      pdf: _pdfRenderer,
+      highlights: _highlightsByPage[idx] ?? const [],
+      initialZoom: _zoom,
+      anchor: _zoomAnchor,
+      pinching: _pinching,
+      stretchWidth: scroll,
+      onZoomChanged: _setInteractiveZoom,
+      onToggleChrome: _toggleChrome,
+      onWordLongPress: _onWordLongPress,
+    );
+  }
+
+  double _singlePageFitWidth(TextLayerPage page, Size size) {
+    // Same fit as the single-page surface: keep the page below the status bar
+    // / camera cutout so the zoom overlay never jumps from the surface.
+    final topInset = MediaQuery.paddingOf(context).top;
+    final base = math.min(
+        size.width / page.width, (size.height - topInset) / page.height);
+    return (page.width * base * _settings.pageZoom).clamp(80.0, 4000.0);
   }
 
   Widget _fixedPdfUnavailableView() {
@@ -702,18 +724,87 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   // --------------------------------------------------------- page geometry
 
-  /// Width each rendered page gets in scroll mode: full available width.
+  /// Interactive session zoom from double-tap / pinch. 1.0 = fitted.
+  double _zoom = 1.0;
+  double _pinchStartZoom = 1.0;
+  bool _pinching = false;
+
+  /// Surface-local point the zoom overlay should zoom about (the double-tapped
+  /// word / pinch focal). Only meaningful at the moment zoom is entered.
+  Offset? _zoomAnchor;
+  Offset? _scrollDoubleTapPos;
+
+  static const double _minZoom = 1.0;
+  static const double _maxZoom = 3.0;
+
+  /// Double-tap zoom steps: 100% → 150% → 200% → back to 100%.
+  static const List<double> _singlePageZoomSteps = [1.0, 1.5, 2.0];
+
+  /// Converts a global position to the reading surface's local space. The
+  /// scroll list, PageView and zoom overlay all fill the same area, so this is
+  /// the shared coordinate space for zoom anchors.
+  Offset? _toSurfaceLocal(Offset global) {
+    final box = _readingKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return null;
+    return box.globalToLocal(global);
+  }
+
+  void _setInteractiveZoom(double z, {Offset? anchor}) {
+    final clamped = z.clamp(_minZoom, _maxZoom);
+    if ((clamped - _zoom).abs() < 0.001) return;
+    final entering = _zoom <= 1.0 && clamped > 1.0;
+    debugPrint('[zoom] _setInteractiveZoom $clamped entering=$entering anchor=$anchor');
+    setState(() {
+      _zoom = clamped;
+      _zoomAnchor = anchor;
+    });
+  }
+
+  void _onScrollDoubleTapDown(TapDownDetails d) {
+    debugPrint('[zoom] SURFACE onScrollDoubleTapDown zoom=$_zoom');
+    _scrollDoubleTapPos = _toSurfaceLocal(d.globalPosition);
+  }
+
+  void _onScrollDoubleTap() {
+    debugPrint('[zoom] SURFACE onScrollDoubleTap zoom=$_zoom');
+    _setInteractiveZoom(_zoom > 1.05 ? 1.0 : 1.5, anchor: _scrollDoubleTapPos);
+    _scrollDoubleTapPos = null;
+  }
+
+  void _onScrollPinchStart(ScaleStartDetails d) {
+    _pinching = true;
+    _pinchStartZoom = _zoom;
+  }
+
+  void _onScrollPinchUpdate(ScaleUpdateDetails d) {
+    _setInteractiveZoom(_pinchStartZoom * d.scale, anchor: d.focalPoint);
+  }
+
+  void _onScrollPinchEnd() {
+    _pinching = false;
+    setState(() {});
+  }
+
+  /// Width each rendered page gets in scroll mode: the full screen width
+  /// (edge-to-edge, no boxed insets), scaled by the persisted page zoom only.
+  /// Interactive zoom never reflows the list — it happens on the zoom overlay,
+  /// so the scroll geometry (and the current page) stays put while zoomed.
   double get _scrollRenderWidth =>
-      ((MediaQuery.sizeOf(context).width - 2 * _readingInset)
-              .clamp(160.0, 900.0)) *
-          _settings.pageZoom;
+      (MediaQuery.sizeOf(context).width * _settings.pageZoom)
+          .clamp(160.0, 4000.0);
 
   double _pageBoxHeight(TextLayerPage p) => _scrollRenderWidth * (p.height / p.width);
 
-  static const double _pageGap = 24;
+  static const double _pageGap = 16;
   static const double _scrollTopPadFactor = 0.06;
 
-  double get _scrollTopPad => MediaQuery.sizeOf(context).height * _scrollTopPadFactor;
+  /// Top pad for the first page in scroll mode: the usual 6% breathing room,
+  /// but never less than the status bar / camera-cutout inset so page text
+  /// never starts hidden behind a notch or punch-hole.
+  double get _scrollTopPad => math.max(
+        MediaQuery.sizeOf(context).height * _scrollTopPadFactor,
+        MediaQuery.paddingOf(context).top + 8,
+      );
 
   /// Deterministic top offset of every page (no TextPainter measurement
   /// needed -- page heights come straight from the page aspect ratio).
@@ -772,51 +863,70 @@ class _ReaderScreenState extends State<ReaderScreen> {
     }
     return NotificationListener<ScrollNotification>(
       onNotification: _onScroll,
-      child: ListView.builder(
-        controller: _scrollController,
-        padding: EdgeInsets.fromLTRB(
-          _readingInset,
-          _scrollTopPad,
-          _readingInset,
-          140,
-        ),
-        itemCount: _renderPages.length,
-        itemBuilder: (context, i) {
-          final page = _renderPages[i];
-          final rw = _scrollRenderWidth;
-          return Padding(
-            padding: const EdgeInsets.only(bottom: _pageGap),
-            child: Center(
-              child: LayoutBuilder(
-                builder: (context, cons) {
-                  final viewport = cons.maxWidth;
-                  // Zoom can push the page past the screen width. When that
-                  // happens the card keeps its full zoomed size and the
-                  // horizontal scroll view lets the reader pan to the rest
-                  // (text stays inside the card); when it fits, it centers.
-                  return SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: SizedBox(
-                      width: math.max(viewport, rw),
-                      child: Center(
-                        child: TextLayerPageView(
-                          page: page,
-                          renderWidth: rw,
-                          settings: _settings,
-                          paper: _paperFor(_settings.atmosphere),
-                          pdf: _pdfRenderer,
-                          highlights: _highlightsByPage[i] ?? const [],
-                          onWordLongPress: (global, rect, s, e, t) =>
-                              _onWordLongPress(i, global, s, e, t),
-                        ),
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-          );
+      child: RawGestureDetector(
+        gestures: {
+          // Two-finger-only pinch so one-finger vertical scrolling is never
+          // stolen by the scale recognizer (see [_TwoPointerScaleGestureRecognizer]).
+          _TwoPointerScaleGestureRecognizer:
+              GestureRecognizerFactoryWithHandlers<_TwoPointerScaleGestureRecognizer>(
+            _TwoPointerScaleGestureRecognizer.new,
+            (r) => r
+              ..onStart = _onScrollPinchStart
+              ..onUpdate = _onScrollPinchUpdate
+              ..onEnd = (_) => _onScrollPinchEnd(),
+          ),
         },
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (_) => debugPrint('[zoom] SURFACE tapDown zoom=$_zoom'),
+          onTapUp: (_) {
+            debugPrint('[zoom] SURFACE onTapUp zoom=$_zoom');
+            _toggleChrome();
+          },
+          onDoubleTapDown: _onScrollDoubleTapDown,
+          onDoubleTap: _onScrollDoubleTap,
+          child: ListView.builder(
+            controller: _scrollController,
+            padding: EdgeInsets.only(top: _scrollTopPad, bottom: 140),
+            itemCount: _renderPages.length,
+            itemBuilder: (context, i) {
+              final page = _renderPages[i];
+              final rw = _scrollRenderWidth;
+              return Padding(
+                padding: const EdgeInsets.only(bottom: _pageGap),
+                child: LayoutBuilder(
+                  builder: (context, cons) {
+                    final viewport = cons.maxWidth;
+                    // At fit the page fills the screen width edge-to-edge --
+                    // continuous flow, never a boxed side-scroll. Only once it
+                    // is zoomed past the screen width does the page allow
+                    // horizontal panning to the rest.
+                    final content = SizedBox(
+                      width: rw,
+                      child: TextLayerPageView(
+                        page: page,
+                        renderWidth: rw,
+                        settings: _settings,
+                        paper: _paperFor(_settings.atmosphere),
+                        pdf: _pdfRenderer,
+                        highlights: _highlightsByPage[i] ?? const [],
+                        onWordLongPress: (global, rect, s, e, t) =>
+                            _onWordLongPress(i, global, s, e, t),
+                      ),
+                    );
+                    if (rw > viewport) {
+                      return SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: content,
+                      );
+                    }
+                    return Center(child: content);
+                  },
+                ),
+              );
+            },
+          ),
+        ),
       ),
     );
   }
@@ -894,29 +1004,24 @@ class _ReaderScreenState extends State<ReaderScreen> {
     });
   }
 
-  // -------------------------------------------------------------- paginated
+  // -------------------------------------------------------------- single page
 
   PageController? _paginateController;
   int _paginateAnchor = 0;
-  bool _paginateSpread = false;
 
-  /// Returns the paginated view's controller, creating it once and reusing it
+  /// Returns the single-page view's controller, creating it once and reusing it
   /// across rebuilds. A fresh controller is only built when the mode changes
-  /// (new [_anchorSeed]) or the spread geometry changes. Recreating it on every
-  /// build made the PageView swap controllers each frame, which could dispose a
-  /// page's widget while its same-index replacement mounted in the same frame.
+  /// (new [_anchorSeed]). Recreating it on every build made the PageView swap
+  /// controllers each frame, which could dispose a page's widget while its
+  /// same-index replacement mounted in the same frame.
   PageController _paginateControllerFor(int initial) {
-    final spread = _spreadActive;
     final current = _paginateController;
-    if (current != null &&
-        _paginateAnchor == _anchorSeed &&
-        _paginateSpread == spread) {
+    if (current != null && _paginateAnchor == _anchorSeed) {
       return current;
     }
-    final next = PageController(initialPage: spread ? initial ~/ 2 : initial);
+    final next = PageController(initialPage: initial);
     _paginateController = next;
     _paginateAnchor = _anchorSeed;
-    _paginateSpread = spread;
     if (current != null) {
       // The old PageView is unmounted at the end of this frame; dispose after.
       WidgetsBinding.instance.addPostFrameCallback((_) => current.dispose());
@@ -924,25 +1029,29 @@ class _ReaderScreenState extends State<ReaderScreen> {
     return next;
   }
 
-  Widget _paginatedView() {
+  Widget _singlePageView() {
     final pages = _renderPages;
     final initial = _currentPage.clamp(0, math.max(0, pages.length - 1)).toInt();
     final controller = _paginateControllerFor(initial);
-    return _PaginatedView(
+    return _SinglePageView(
       key: ValueKey('pag-$_anchorSeed'),
       controller: controller,
       pages: pages,
       settings: _settings,
-      inset: _readingInset,
+      zoom: _zoom,
+      onZoomChanged: _setInteractiveZoom,
       paper: _paperFor(_settings.atmosphere),
       pdf: _pdfRenderer,
       highlights: _highlightsByPage,
       initialPage: initial,
-      isTablet: MediaQuery.sizeOf(context).shortestSide >= 600,
       onPageChanged: _onPageChanged,
       onWordLongPress: (page, global, s, e, t) =>
           _onWordLongPress(page, global, s, e, t),
       onToggleChrome: _toggleChrome,
+      onPinchState: (v) {
+        _pinching = v;
+        if (!v) setState(() {});
+      },
     );
   }
 
@@ -1073,9 +1182,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
         duration: const Duration(milliseconds: 250),
         opacity: _uiVisible ? 1 : 0,
         child: Container(
-          padding: EdgeInsets.only(
-            top: MediaQuery.paddingOf(context).top,
-          ),
           decoration: BoxDecoration(
             color: _settings.atmosphere.background.withValues(alpha: 0.9),
             border: Border(
@@ -1219,9 +1325,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
         ),
         child: ReaderAppearanceSheet(
           initial: _settings,
-          // PDF mode (pdfrx) renders pages for every book, so both scroll and
-          // paginated are always available — run-less books included.
-          reflowAvailable: true,
           onChanged: _updateSettings,
         ),
       ),
@@ -1612,73 +1715,102 @@ class _HighlightMenu extends StatelessWidget {
   }
 }
 
-/// The paginated reading surface: one physical PDF page at a time (or a
-/// two-page spread on tablets), turned with swipe; left/right thirds flip
-/// pages, the centre toggles chrome. Spread mode mirrors the web reader's
-/// `page_layout: spread`: the current index is always the left page of a pair,
-/// and flipping moves by two.
-class _PaginatedView extends StatefulWidget {
+/// A [ScaleGestureRecognizer] that only claims the gesture once a second
+/// pointer is down. This lets single-finger swipes (page flips, vertical
+/// scroll) win the arena, while a genuine two-finger pinch still zooms.
+///
+/// Every pointer is registered with [super.addAllowedPointer] so the recognizer
+/// tracks both fingers and can compute a real span (without this, scale is
+/// always 1.0 and a pinch is misread as a pan). Single-finger movement is
+/// dropped in [handleEvent] so the recognizer never advances its state machine
+/// on one finger and thus never steals scroll / page flips.
+class _TwoPointerScaleGestureRecognizer extends ScaleGestureRecognizer {
+  int _pointersDown = 0;
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    _pointersDown++;
+    super.addAllowedPointer(event);
+  }
+
+  @override
+  void handleEvent(PointerEvent event) {
+    if (event is PointerUpEvent || event is PointerCancelEvent) {
+      _pointersDown--;
+    }
+    // Single-finger moves are dropped so the recognizer never accumulates
+    // enough focal movement to claim the gesture; once the second finger is
+    // down every event is forwarded and span/scale are computed from both.
+    if (event is PointerMoveEvent && _pointersDown < 2) return;
+    super.handleEvent(event);
+  }
+
+  @override
+  void didStopTrackingLastPointer(int pointer) {
+    _pointersDown = 0;
+    super.didStopTrackingLastPointer(pointer);
+  }
+}
+
+/// The single-page reading surface: one full PDF page fitted to the screen at
+/// a time, turned with a left/right swipe (tap zones flip too). Double-tap
+/// cycles zoom 100% → 150% → 200% → 100%, pinch zooms continuously, and once
+/// zoomed past the viewport the page pans both axes (Adobe-style). At fit the
+/// whole page is always visible — the top is never clipped.
+class _SinglePageView extends StatefulWidget {
   final PageController controller;
   final List<TextLayerPage> pages;
   final ReaderSettings settings;
-  final double inset;
+  final double zoom;
+  final void Function(double zoom, {Offset? anchor}) onZoomChanged;
   final Color paper;
   final PdfRenderer pdf;
   final Map<int, List<PageHighlight>> highlights;
   final int initialPage;
-  final bool isTablet;
   final void Function(int index, int total) onPageChanged;
   final void Function(int page, Offset global, int start, int end, String text)
       onWordLongPress;
   final VoidCallback onToggleChrome;
+  final ValueChanged<bool>? onPinchState;
 
-  const _PaginatedView({
+  const _SinglePageView({
     super.key,
     required this.controller,
     required this.pages,
     required this.settings,
-    required this.inset,
+    required this.zoom,
+    required this.onZoomChanged,
     required this.paper,
     required this.pdf,
     required this.highlights,
     required this.initialPage,
-    required this.isTablet,
     required this.onPageChanged,
     required this.onWordLongPress,
     required this.onToggleChrome,
+    this.onPinchState,
   });
 
   @override
-  State<_PaginatedView> createState() => _PaginatedViewState();
+  State<_SinglePageView> createState() => _SinglePageViewState();
 }
 
-class _PaginatedViewState extends State<_PaginatedView> {
-  bool get _spread =>
-      widget.isTablet && widget.settings.layout == PageLayout.spread;
-
-  /// Number of PageView items: one per physical page, or one per paired spread.
-  int get _itemCount =>
-      _spread ? (widget.pages.length + 1) ~/ 2 : widget.pages.length;
-
-  /// PageView index for a physical page.
-  int _itemFor(int page) => _spread ? page ~/ 2 : page;
-
-  /// Physical page reported for a PageView index (the left page of a pair).
-  int _pageForItem(int item) => _spread ? item * 2 : item;
+class _SinglePageViewState extends State<_SinglePageView> {
+  double _pinchStartZoom = 1.0;
+  Offset? _doubleTapPos;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
-        widget.onPageChanged(_pageForItem(_itemFor(widget.initialPage)), widget.pages.length);
+        widget.onPageChanged(widget.initialPage, widget.pages.length);
       }
     });
   }
 
   void _flip(int delta) {
     final target = _current + delta;
-    if (target < 0 || target >= _itemCount) return;
+    if (target < 0 || target >= widget.pages.length) return;
     widget.controller.animateToPage(
       target,
       duration: const Duration(milliseconds: 280),
@@ -1687,8 +1819,8 @@ class _PaginatedViewState extends State<_PaginatedView> {
   }
 
   int get _current => widget.controller.hasClients
-      ? widget.controller.page?.round() ?? _itemFor(widget.initialPage)
-      : _itemFor(widget.initialPage);
+      ? widget.controller.page?.round() ?? widget.initialPage
+      : widget.initialPage;
 
   void _onTapUp(TapUpDetails d) {
     final w = MediaQuery.sizeOf(context).width;
@@ -1701,6 +1833,38 @@ class _PaginatedViewState extends State<_PaginatedView> {
       widget.onToggleChrome();
     }
   }
+
+  Offset? _toSurfaceLocal(Offset global) {
+    final box = context.findRenderObject() as RenderBox?;
+    return box?.globalToLocal(global);
+  }
+
+  void _onDoubleTapDown(TapDownDetails d) =>
+      _doubleTapPos = _toSurfaceLocal(d.globalPosition);
+
+  void _onDoubleTap() {
+    const steps = _ReaderScreenState._singlePageZoomSteps;
+    final idx = steps.indexOf(widget.zoom);
+    widget.onZoomChanged(
+      idx == -1 ? 1.5 : steps[(idx + 1) % steps.length],
+      anchor: _doubleTapPos,
+    );
+    _doubleTapPos = null;
+  }
+
+  void _onPinchStart(ScaleStartDetails d) {
+    widget.onPinchState?.call(true);
+    _pinchStartZoom = widget.zoom;
+  }
+
+  void _onPinchUpdate(ScaleUpdateDetails d) {
+    widget.onZoomChanged(
+      _pinchStartZoom * d.scale,
+      anchor: d.focalPoint,
+    );
+  }
+
+  void _onPinchEnd() => widget.onPinchState?.call(false);
 
   Widget _buildPage(TextLayerPage page, double renderWidth, int physicalIdx) {
     return TextLayerPageView(
@@ -1719,79 +1883,327 @@ class _PaginatedViewState extends State<_PaginatedView> {
   Widget build(BuildContext context) {
     return PageView.builder(
       controller: widget.controller,
-      onPageChanged: (i) =>
-          widget.onPageChanged(_pageForItem(i), widget.pages.length),
-      itemCount: _itemCount,
+      onPageChanged: (i) => widget.onPageChanged(i, widget.pages.length),
+      itemCount: widget.pages.length,
       itemBuilder: (context, i) {
         final size = MediaQuery.sizeOf(context);
-        final availW = size.width - 2 * widget.inset;
-        final availH = size.height - 180;
-        final zoom = widget.settings.pageZoom;
-        final fitWidth = widget.settings.fitMode == FitMode.width;
-        // Base fit scale: Fit Width fills the viewport width, Fit Page fits
-        // both axes. Zoom then scales beyond that -- the page may outgrow the
-        // viewport, in which case it is wrapped in a both-axis pan view so the
-        // reader can move around it (Adobe-style), never overflowing.
-        double baseScaleFor(double w, double h) =>
-            fitWidth ? availW / w : math.min(availW / w, availH / h);
+        final page = widget.pages[i];
+        // Fit the whole page inside the safe area (both axes) so nothing is
+        // clipped and page text never starts behind the status bar / camera
+        // cutout. Interactive zoom lives on the zoom overlay, never here, so
+        // the PageView geometry (and the current page) stays put while zoomed.
+        final topInset = MediaQuery.paddingOf(context).top;
+        final availW = size.width;
+        final availH = size.height - topInset;
+        final base = math.min(availW / page.width, availH / page.height);
+        final rw = (page.width * base * widget.settings.pageZoom)
+            .clamp(80.0, 4000.0);
+        final pageH = rw * page.height / page.width;
+        final topPad = topInset + (availH - pageH) / 2;
+        final child = _buildPage(page, rw, i);
 
-        Widget child;
-        bool needsPan;
-        if (_spread) {
-          final pg = widget.pages[_pageForItem(i)];
-          final pg2Idx = _pageForItem(i) + 1;
-          final pg2 = pg2Idx < widget.pages.length ? widget.pages[pg2Idx] : null;
-          const gap = 24.0;
-          final combinedW = pg.width + (pg2 != null ? pg2.width + gap : 0);
-          final maxH = math.max(pg.height, pg2?.height ?? pg.height);
-          final scale = baseScaleFor(combinedW, maxH);
-          final rw = (pg.width * scale * zoom).clamp(80.0, 4000.0).toDouble();
-          final rw2 = pg2 != null
-              ? (pg2.width * scale * zoom).clamp(80.0, 4000.0).toDouble()
-              : 0.0;
-          final rh1 = pg.height * (rw / pg.width);
-          final rh2 = pg2 != null ? pg2.height * (rw2 / pg2.width) : 0.0;
-          needsPan = (rw + gap + rw2) > availW || math.max(rh1, rh2) > availH;
-          child = Row(
-            mainAxisSize: MainAxisSize.min,
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              _buildPage(pg, rw, _pageForItem(i)),
-              if (pg2 != null) ...[
-                SizedBox(width: gap),
-                _buildPage(pg2, rw2, pg2Idx),
-              ],
-            ],
-          );
-        } else {
-          final page = widget.pages[i];
-          final scale = baseScaleFor(page.width, page.height);
-          final rw = (page.width * scale * zoom).clamp(80.0, 4000.0).toDouble();
-          final rh = page.height * (rw / page.width);
-          needsPan = rw > availW || rh > availH;
-          child = _buildPage(page, rw, i);
-        }
-        if (!needsPan) {
-          return GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTapUp: _onTapUp,
-            child: Center(child: child),
-          );
-        }
-        // Zoomed past the viewport: pan both axes. The page keeps its full
-        // zoomed size, so the text stays inside the card (no overflow stripes).
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTapUp: _onTapUp,
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: SingleChildScrollView(
-              scrollDirection: Axis.vertical,
-              child: child,
+          onDoubleTapDown: _onDoubleTapDown,
+          onDoubleTap: _onDoubleTap,
+          child: RawGestureDetector(
+            gestures: {
+              // Two-finger-only pinch so a one-finger swipe still flips pages.
+              _TwoPointerScaleGestureRecognizer:
+                  GestureRecognizerFactoryWithHandlers<_TwoPointerScaleGestureRecognizer>(
+                _TwoPointerScaleGestureRecognizer.new,
+                (r) => r
+                  ..onStart = _onPinchStart
+                  ..onUpdate = _onPinchUpdate
+                  ..onEnd = (_) => _onPinchEnd(),
+              ),
+            },
+            child: Align(
+              alignment: Alignment.topCenter,
+              child: Padding(
+                padding: EdgeInsets.only(top: topPad),
+                child: child,
+              ),
             ),
           ),
         );
       },
+    );
+  }
+}
+
+/// Full-screen Adobe-style zoom surface shared by scroll and single-page
+/// modes. The current page is rendered at its fitted width and scaled by a
+/// pure matrix transform, so zooming never re-lays-out the document. Pinch
+/// anchors at the focal point, a single finger roams the page, and double-tap
+/// cycles 100% → 150% → 200% → back to 100%. On each gesture settle the scale
+/// is committed: the page re-renders once at the new width for crisp text.
+class _ZoomablePage extends StatefulWidget {
+  final TextLayerPage page;
+  final int pageIndex;
+  final double fitWidth;
+  final ReaderSettings settings;
+  final Color paper;
+  final PdfRenderer? pdf;
+  final List<PageHighlight> highlights;
+  final double initialZoom;
+  final Offset? anchor;
+  final bool pinching;
+  final bool stretchWidth;
+  final ValueChanged<double> onZoomChanged;
+  final VoidCallback onToggleChrome;
+  final void Function(int page, Offset global, int start, int end, String text)
+      onWordLongPress;
+
+  const _ZoomablePage({
+    super.key,
+    required this.page,
+    required this.pageIndex,
+    required this.fitWidth,
+    required this.settings,
+    required this.paper,
+    required this.pdf,
+    required this.highlights,
+    required this.initialZoom,
+    required this.stretchWidth,
+    required this.onZoomChanged,
+    required this.onToggleChrome,
+    required this.onWordLongPress,
+    this.anchor,
+    this.pinching = false,
+  });
+
+  @override
+  State<_ZoomablePage> createState() => _ZoomablePageState();
+}
+
+class _ZoomablePageState extends State<_ZoomablePage> {
+  static const double _maxZoom = 3.0;
+
+  /// Settled scale baked into the page's render width.
+  double _committed = 1.0;
+
+  /// Live extra scale applied by the transform during a gesture.
+  double _gesture = 1.0;
+
+  /// The page's top-left offset on screen (surface-local pixels).
+  Offset _translation = Offset.zero;
+
+  double _pinchBase = 1.0;
+  Offset _doubleTapPos = Offset.zero;
+
+  double get _visualScale => _committed * _gesture;
+
+  Size get _viewport => MediaQuery.sizeOf(context);
+
+  /// Where the page's top-left sits on screen at 100%.
+  Offset get _fitTopLeft {
+    if (widget.stretchWidth) return Offset.zero;
+    final h = widget.page.height * (widget.fitWidth / widget.page.width);
+    // Match the single-page surface placement: centered within the safe area
+    // below the status bar / camera cutout, never under it.
+    final topInset = MediaQuery.paddingOf(context).top;
+    final availH = _viewport.height - topInset;
+    return Offset(
+      (_viewport.width - widget.fitWidth) / 2,
+      topInset + (availH - h) / 2,
+    );
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    final s = widget.initialZoom.clamp(1.0, _maxZoom);
+    _committed = s;
+    debugPrint('[zoom] overlay mount key=${widget.key} page=${widget.pageIndex} scale=$s '
+        'anchor=${widget.anchor} stretch=${widget.stretchWidth}');
+    if (s > 1.0) {
+      final p0 = _fitTopLeft;
+      final anchor = widget.anchor ?? _viewport.center(Offset.zero);
+      _translation = _clampTranslation(p0 + (anchor - p0) * (1 - s));
+    }
+  }
+
+  @override
+  void didUpdateWidget(_ZoomablePage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final s = widget.initialZoom.clamp(1.0, _maxZoom);
+    final wasZoomed = oldWidget.initialZoom > 1.0;
+    final isZoomed = s > 1.0;
+
+    if (widget.pinching) {
+      // Surface pinch in progress: mirror the live scale as a pure transform
+      // (no page re-render) while keeping the focal anchor fixed.
+      if (isZoomed) {
+        final old = _visualScale;
+        if (old > 0) {
+          final k = s / old;
+          final anchor = widget.anchor;
+          if (anchor != null) _translation = anchor + (_translation - anchor) * k;
+          _gesture = _committed > 0 ? s / _committed : 1.0;
+          _translation = _clampTranslation(_translation);
+        }
+      } else {
+        // Pinched back below 100%: hold at the fitted size.
+        _gesture = _committed > 0 ? 1.0 / _committed : 1.0;
+      }
+    } else if (!wasZoomed && isZoomed) {
+      // Zoom entered: anchor the page about the double-tapped / pinched point.
+      _committed = s;
+      _gesture = 1.0;
+      final p0 = _fitTopLeft;
+      final anchor = widget.anchor ?? _viewport.center(Offset.zero);
+      _translation = _clampTranslation(p0 + (anchor - p0) * (1 - s));
+      debugPrint('[zoom] didUpdate enter s=$s p0=$p0 anchor=$anchor '
+          't=${_translation} viewport=$_viewport fit=${widget.fitWidth}');
+    } else if (wasZoomed && !isZoomed) {
+      _committed = 1.0;
+      _gesture = 1.0;
+      _translation = Offset.zero;
+    } else if (isZoomed && (_gesture != 1.0 || (s - _committed).abs() > 0.001)) {
+      // Gesture settle / zoom change: commit once for a crisp re-render.
+      _committed = s;
+      _gesture = 1.0;
+    }
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    debugPrint('[zoom] overlay dispose');
+    super.dispose();
+  }
+
+  Offset _clampTranslation(Offset t) {
+    final v = _viewport;
+    final w = widget.fitWidth * _visualScale;
+    final h =
+        widget.page.height * (widget.fitWidth / widget.page.width) * _visualScale;
+    final x = w <= v.width ? (v.width - w) / 2 : t.dx.clamp(v.width - w, 0.0);
+    final y = h <= v.height ? (v.height - h) / 2 : t.dy.clamp(v.height - h, 0.0);
+    debugPrint('[zoom] clamp in=$t -> ($x,$y) viewport=$v w=$w h=$h');
+    return Offset(x, y);
+  }
+
+  void _onPinchStart(ScaleStartDetails d) => _pinchBase = _visualScale;
+
+  void _onPinchUpdate(ScaleUpdateDetails d) {
+    final old = _visualScale;
+    if (old <= 0) return;
+    final newScale = (_pinchBase * d.scale).clamp(1.0, _maxZoom);
+    final k = newScale / old;
+    final f = d.focalPoint;
+    // Keep the point under the fingers fixed: t' = f + (t - f) * k.
+    _translation = f + (_translation - f) * k;
+    _gesture = _committed > 0 ? newScale / _committed : 1.0;
+    _translation = _clampTranslation(_translation);
+    setState(() {});
+  }
+
+  void _onPanUpdate(DragUpdateDetails d) {
+    _translation = _clampTranslation(_translation + d.delta);
+    setState(() {});
+  }
+
+  void _onDoubleTapDown(TapDownDetails d) {
+    debugPrint('[zoom] OVERLAY onDoubleTapDown committed=$_committed');
+    _doubleTapPos = d.localPosition;
+  }
+
+  void _onDoubleTap() {
+    final s = _visualScale;
+    final f = _doubleTapPos;
+    final double target;
+    if (s < 1.25) {
+      target = 1.5;
+    } else if (s < 1.75) {
+      target = 2.0;
+    } else {
+      widget.onZoomChanged(1.0);
+      return;
+    }
+    // Zoom about the tapped point, then commit for a crisp re-render.
+    final k = target / s;
+    _translation = _clampTranslation(f + (_translation - f) * k);
+    _committed = target;
+    _gesture = 1.0;
+    debugPrint('[zoom] doubleTap from=$s to=$target at=$f t=${_translation}');
+    widget.onZoomChanged(target);
+    setState(() {});
+  }
+
+  /// Called when a pinch or pan ends: bake the live scale into the committed
+  /// width (one crisp re-render) and sync the reader's zoom state.
+  void _onInteractionEnd() {
+    final s = _visualScale.clamp(1.0, _maxZoom);
+    _committed = s;
+    _gesture = 1.0;
+    _translation = _clampTranslation(_translation);
+    debugPrint('[zoom] interactionEnd scale=$s t=${_translation}');
+    if (mounted) setState(() {});
+    widget.onZoomChanged(s);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // While not zoomed the overlay still exists (so its element and render
+    // object stay stable for hit-testing) but renders nothing, so scrolling /
+    // page turns never pay for an invisible re-render of the current page.
+    if (_committed <= 1.0 && _gesture <= 1.0) return const SizedBox.shrink();
+    final rw = (widget.fitWidth * _committed).clamp(80.0, 4000.0);    final rh = widget.page.height * (rw / widget.page.width);
+    final matrix = Matrix4.identity()
+      ..setEntry(0, 0, _gesture)
+      ..setEntry(1, 1, _gesture)
+      ..setTranslationRaw(_translation.dx, _translation.dy, 0);
+
+    final content = SizedBox(
+      width: rw,
+      height: rh,
+      child: TextLayerPageView(
+        page: widget.page,
+        renderWidth: rw,
+        settings: widget.settings,
+        paper: widget.paper,
+        pdf: widget.pdf,
+        highlights: widget.highlights,
+        onWordLongPress: (global, rect, s, e, t) =>
+            widget.onWordLongPress(widget.pageIndex, global, s, e, t),
+      ),
+    );
+
+    return ClipRect(
+      child: Container(
+        color: widget.paper,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (_) => debugPrint('[zoom] OVERLAY tapDown'),
+          onTapUp: (_) {
+            debugPrint('[zoom] OVERLAY onTapUp');
+            widget.onToggleChrome();
+          },
+          onDoubleTapDown: _onDoubleTapDown,
+          onDoubleTap: _onDoubleTap,
+          onPanUpdate: _onPanUpdate,
+          onPanEnd: (_) => _onInteractionEnd(),
+          child: RawGestureDetector(
+            gestures: {
+              _TwoPointerScaleGestureRecognizer:
+                  GestureRecognizerFactoryWithHandlers<_TwoPointerScaleGestureRecognizer>(
+                _TwoPointerScaleGestureRecognizer.new,
+                (r) => r
+                  ..onStart = _onPinchStart
+                  ..onUpdate = _onPinchUpdate
+                  ..onEnd = (_) => _onInteractionEnd(),
+              ),
+            },
+            child: Transform(
+              transform: matrix,
+              child: content,
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -1987,7 +2399,6 @@ class _SyncIndicatorState extends State<_SyncIndicator>
 
   @override
   void dispose() {
-    _controller.dispose();
     super.dispose();
   }
 
