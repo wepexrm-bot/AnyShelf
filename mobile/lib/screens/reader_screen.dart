@@ -655,13 +655,35 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final pages = _renderPages;
     final size = MediaQuery.sizeOf(context);
     final scroll = _settings.mode == ReaderMode.scroll;
-    final idx = _currentPage.clamp(0, math.max(0, pages.length - 1)).toInt();
+    final idx =
+        (_zoomPageIndex ?? _currentPage).clamp(0, math.max(0, pages.length - 1)).toInt();
     final page = pages[idx];
+    final fitWidth = scroll ? _scrollRenderWidth : _singlePageFitWidth(page, size);
+    final Offset? topLeft;
+    if (scroll) {
+      final pixels = _scrollPixels();
+      if (pixels != null) {
+        final pageTopY = _scrollOffsetForPage(idx) - pixels;
+        final pageTopX = math.max(0.0, (size.width - fitWidth) / 2);
+        topLeft = Offset(pageTopX, pageTopY);
+      } else {
+        topLeft = null;
+      }
+    } else {
+      topLeft = null;
+    }
     return _ZoomablePage(
-      key: ValueKey('zoom-$_anchorSeed-$idx'),
+      // The key is stable per reading surface (rekeyed only on mode switch).
+      // It must NOT include the page index: while zoomed out [_zoomPageIndex]
+      // is null and idx tracks the frequently-changing [_currentPage], so a
+      // page-derived key would unmount and remount the overlay element on every
+      // page boundary crossed -- churning MediaQuery/Theme dependents during
+      // in-flight gestures and trips the framework's element-deactivation
+      // asserts (_dependents.isEmpty / ScrollController multi-position).
+      key: ValueKey('zoom-$_anchorSeed'),
       page: page,
       pageIndex: idx,
-      fitWidth: scroll ? _scrollRenderWidth : _singlePageFitWidth(page, size),
+      fitWidth: fitWidth,
       settings: _settings,
       paper: _paperFor(_settings.atmosphere),
       pdf: _pdfRenderer,
@@ -670,6 +692,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       anchor: _zoomAnchor,
       pinching: _pinching,
       stretchWidth: scroll,
+      topLeft: topLeft,
       onZoomChanged: _setInteractiveZoom,
       onToggleChrome: _toggleChrome,
       onWordLongPress: _onWordLongPress,
@@ -734,6 +757,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
   Offset? _zoomAnchor;
   Offset? _scrollDoubleTapPos;
 
+  /// Page the zoom overlay renders in scroll mode: the page containing the
+  /// double-tapped / pinched point at the moment zoom was entered, so tapping
+  /// the visible sliver of the next page zooms that page (not the top-visible
+  /// one). Null = fall back to [_currentPage].
+  int? _zoomPageIndex;
+
   static const double _minZoom = 1.0;
   static const double _maxZoom = 3.0;
 
@@ -753,20 +782,51 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final clamped = z.clamp(_minZoom, _maxZoom);
     if ((clamped - _zoom).abs() < 0.001) return;
     final entering = _zoom <= 1.0 && clamped > 1.0;
-    debugPrint('[zoom] _setInteractiveZoom $clamped entering=$entering anchor=$anchor');
     setState(() {
       _zoom = clamped;
       _zoomAnchor = anchor;
+      if (clamped <= 1.0) {
+        _zoomPageIndex = null;
+      } else if (entering && anchor != null &&
+          _settings.mode == ReaderMode.scroll) {
+        _zoomPageIndex = _scrollPageForAnchor(anchor);
+      }
     });
   }
 
+  /// Reads the scroll list's current pixel offset without ever hitting
+  /// [ScrollController.position]'s single-position assert: while the list is
+  /// being swapped / reattached there can briefly be zero or multiple attached
+  /// positions, and the assert would fire mid-gesture. Iterating [positions]
+  /// (which never asserts) and returning the first is safe in every frame.
+  double? _scrollPixels() {
+    if (!_scrollController.hasClients) return null;
+    for (final p in _scrollController.positions) {
+      return p.pixels;
+    }
+    return null;
+  }
+
+  /// The page whose document range contains the surface-local [anchor] point
+  /// (surface y + current scroll offset = document y), or the top-visible page
+  /// when the point lands in a gap / past the last page.
+  int _scrollPageForAnchor(Offset anchor) {
+    final pixels = _scrollPixels();
+    if (pixels == null) return _currentPage;
+    final docY = pixels + anchor.dy;
+    final offsets = _scrollOffsets();
+    for (var i = 0; i < offsets.length; i++) {
+      final bottom = offsets[i] + _pageBoxHeight(_renderPages[i]);
+      if (docY >= offsets[i] && docY <= bottom) return i;
+    }
+    return _currentPage;
+  }
+
   void _onScrollDoubleTapDown(TapDownDetails d) {
-    debugPrint('[zoom] SURFACE onScrollDoubleTapDown zoom=$_zoom');
     _scrollDoubleTapPos = _toSurfaceLocal(d.globalPosition);
   }
 
   void _onScrollDoubleTap() {
-    debugPrint('[zoom] SURFACE onScrollDoubleTap zoom=$_zoom');
     _setInteractiveZoom(_zoom > 1.05 ? 1.0 : 1.5, anchor: _scrollDoubleTapPos);
     _scrollDoubleTapPos = null;
   }
@@ -836,15 +896,16 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   int? _topVisiblePageInScroll() {
-    if (!_scrollController.hasClients) return null;
-    final px = _scrollController.position.pixels - _scrollTopPad + 2;
+    final px = _scrollPixels();
+    if (px == null) return null;
+    final visibleTop = px - _scrollTopPad + 2;
     final offsets = _scrollOffsets();
     var lo = 0;
     var hi = offsets.length - 1;
     var idx = 0;
     while (lo <= hi) {
       final mid = (lo + hi) >> 1;
-      if (offsets[mid] <= px) {
+      if (offsets[mid] <= visibleTop) {
         idx = mid;
         lo = mid + 1;
       } else {
@@ -878,9 +939,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
         },
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
-          onTapDown: (_) => debugPrint('[zoom] SURFACE tapDown zoom=$_zoom'),
           onTapUp: (_) {
-            debugPrint('[zoom] SURFACE onTapUp zoom=$_zoom');
             _toggleChrome();
           },
           onDoubleTapDown: _onScrollDoubleTapDown,
@@ -964,6 +1023,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   void _syncPageFromScroll() {
+    // While zoomed the page index is frozen on the zoom overlay (see
+    // [_zoomPageIndex]); a fling-settle notification must not rebuild the
+    // surface (and churn the overlay's element) underneath the zoom.
+    if (_zoom > 1.0 || _zoomPageIndex != null) return;
     final idx = _topVisiblePageInScroll();
     if (idx == null) return;
     if (idx != _currentPage) setState(() => _currentPage = idx);
@@ -1724,31 +1787,28 @@ class _HighlightMenu extends StatelessWidget {
 /// always 1.0 and a pinch is misread as a pan). Single-finger movement is
 /// dropped in [handleEvent] so the recognizer never advances its state machine
 /// on one finger and thus never steals scroll / page flips.
+///
+/// The drop decision uses the superclass-maintained [pointerCount] (never a
+/// local counter): a pointer rejected by the arena (e.g. the scrollable winning
+/// the first finger) is removed from that count automatically, so a lone
+/// remaining finger can never be mis-read as a two-finger pinch that would
+/// steal the scroll. The gesture is claimed eagerly as soon as a second finger
+/// is down, beating the scrollable's single-finger drag without needing the
+/// fingers to spread past the scale slop first.
 class _TwoPointerScaleGestureRecognizer extends ScaleGestureRecognizer {
-  int _pointersDown = 0;
-
-  @override
-  void addAllowedPointer(PointerDownEvent event) {
-    _pointersDown++;
-    super.addAllowedPointer(event);
-  }
-
   @override
   void handleEvent(PointerEvent event) {
-    if (event is PointerUpEvent || event is PointerCancelEvent) {
-      _pointersDown--;
-    }
     // Single-finger moves are dropped so the recognizer never accumulates
     // enough focal movement to claim the gesture; once the second finger is
     // down every event is forwarded and span/scale are computed from both.
-    if (event is PointerMoveEvent && _pointersDown < 2) return;
+    if (event is PointerMoveEvent && pointerCount < 2) return;
     super.handleEvent(event);
-  }
-
-  @override
-  void didStopTrackingLastPointer(int pointer) {
-    _pointersDown = 0;
-    super.didStopTrackingLastPointer(pointer);
+    // Any second finger down is a pinch: claim it immediately so the
+    // scrollable's single-finger drag can't win the arena during the fingers'
+    // spread. Resolving again after a claim is already started is a no-op.
+    if (event is PointerDownEvent && pointerCount >= 2) {
+      resolve(GestureDisposition.accepted);
+    }
   }
 }
 
@@ -1951,6 +2011,13 @@ class _ZoomablePage extends StatefulWidget {
   final Offset? anchor;
   final bool pinching;
   final bool stretchWidth;
+
+  /// Where the page's top-left sits on screen at 100% in scroll mode (its real
+  /// position in the scroll list, so the y offset can be negative when scrolled
+  /// into the page). Ignored outside scroll mode, where [_fitTopLeft] computes
+  /// the single-page fit placement itself.
+  final Offset? topLeft;
+
   final ValueChanged<double> onZoomChanged;
   final VoidCallback onToggleChrome;
   final void Function(int page, Offset global, int start, int end, String text)
@@ -1971,6 +2038,7 @@ class _ZoomablePage extends StatefulWidget {
     required this.onToggleChrome,
     required this.onWordLongPress,
     this.anchor,
+    this.topLeft,
     this.pinching = false,
   });
 
@@ -1999,7 +2067,7 @@ class _ZoomablePageState extends State<_ZoomablePage> {
 
   /// Where the page's top-left sits on screen at 100%.
   Offset get _fitTopLeft {
-    if (widget.stretchWidth) return Offset.zero;
+    if (widget.stretchWidth) return widget.topLeft ?? Offset.zero;
     final h = widget.page.height * (widget.fitWidth / widget.page.width);
     // Match the single-page surface placement: centered within the safe area
     // below the status bar / camera cutout, never under it.
@@ -2016,8 +2084,6 @@ class _ZoomablePageState extends State<_ZoomablePage> {
     super.initState();
     final s = widget.initialZoom.clamp(1.0, _maxZoom);
     _committed = s;
-    debugPrint('[zoom] overlay mount key=${widget.key} page=${widget.pageIndex} scale=$s '
-        'anchor=${widget.anchor} stretch=${widget.stretchWidth}');
     if (s > 1.0) {
       final p0 = _fitTopLeft;
       final anchor = widget.anchor ?? _viewport.center(Offset.zero);
@@ -2055,8 +2121,6 @@ class _ZoomablePageState extends State<_ZoomablePage> {
       final p0 = _fitTopLeft;
       final anchor = widget.anchor ?? _viewport.center(Offset.zero);
       _translation = _clampTranslation(p0 + (anchor - p0) * (1 - s));
-      debugPrint('[zoom] didUpdate enter s=$s p0=$p0 anchor=$anchor '
-          't=${_translation} viewport=$_viewport fit=${widget.fitWidth}');
     } else if (wasZoomed && !isZoomed) {
       _committed = 1.0;
       _gesture = 1.0;
@@ -2071,7 +2135,6 @@ class _ZoomablePageState extends State<_ZoomablePage> {
 
   @override
   void dispose() {
-    debugPrint('[zoom] overlay dispose');
     super.dispose();
   }
 
@@ -2081,8 +2144,16 @@ class _ZoomablePageState extends State<_ZoomablePage> {
     final h =
         widget.page.height * (widget.fitWidth / widget.page.width) * _visualScale;
     final x = w <= v.width ? (v.width - w) / 2 : t.dx.clamp(v.width - w, 0.0);
-    final y = h <= v.height ? (v.height - h) / 2 : t.dy.clamp(v.height - h, 0.0);
-    debugPrint('[zoom] clamp in=$t -> ($x,$y) viewport=$v w=$w h=$h');
+    final double y;
+    if (widget.stretchWidth) {
+      // Scroll mode: the page keeps its real scroll offset, so its top may sit
+      // above the screen (negative). The zoom math keeps the tapped / pinched
+      // point fixed; clamping y back toward 0 (or centering) would snap that
+      // point away from the finger, so only the horizontal axis is clamped.
+      y = t.dy;
+    } else {
+      y = h <= v.height ? (v.height - h) / 2 : t.dy.clamp(v.height - h, 0.0);
+    }
     return Offset(x, y);
   }
 
@@ -2107,7 +2178,6 @@ class _ZoomablePageState extends State<_ZoomablePage> {
   }
 
   void _onDoubleTapDown(TapDownDetails d) {
-    debugPrint('[zoom] OVERLAY onDoubleTapDown committed=$_committed');
     _doubleTapPos = d.localPosition;
   }
 
@@ -2128,7 +2198,6 @@ class _ZoomablePageState extends State<_ZoomablePage> {
     _translation = _clampTranslation(f + (_translation - f) * k);
     _committed = target;
     _gesture = 1.0;
-    debugPrint('[zoom] doubleTap from=$s to=$target at=$f t=${_translation}');
     widget.onZoomChanged(target);
     setState(() {});
   }
@@ -2140,7 +2209,6 @@ class _ZoomablePageState extends State<_ZoomablePage> {
     _committed = s;
     _gesture = 1.0;
     _translation = _clampTranslation(_translation);
-    debugPrint('[zoom] interactionEnd scale=$s t=${_translation}');
     if (mounted) setState(() {});
     widget.onZoomChanged(s);
   }
@@ -2177,9 +2245,7 @@ class _ZoomablePageState extends State<_ZoomablePage> {
         color: widget.paper,
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
-          onTapDown: (_) => debugPrint('[zoom] OVERLAY tapDown'),
           onTapUp: (_) {
-            debugPrint('[zoom] OVERLAY onTapUp');
             widget.onToggleChrome();
           },
           onDoubleTapDown: _onDoubleTapDown,
