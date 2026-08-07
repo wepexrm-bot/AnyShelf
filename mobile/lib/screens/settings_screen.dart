@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:provider/provider.dart';
 
 import '../services/api_client.dart';
 import '../services/auth_service.dart';
+import '../services/books_service.dart';
 import '../services/library_refresh.dart';
 import '../services/ui_mode_controller.dart';
 import '../theme/serene_theme.dart';
@@ -48,6 +50,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _signOut() async {
     await _auth.logout();
+    BooksService.clearRenderers();
     LibraryRefresh.instance.clear();
     if (!mounted) return;
     Navigator.of(context).pushAndRemoveUntil(
@@ -92,6 +95,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   onChangePassword: _changePassword,
                   onSignOut: _signOut,
                 ),
+                const SizedBox(height: 24),
+                const _AboutCard(),
               ],
             ),
           ),
@@ -250,6 +255,49 @@ class _AccountCard extends StatelessWidget {
                 style: SereneType.uiBody.copyWith(color: colors.error)),
             onTap: onSignOut,
           ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AboutCard extends StatefulWidget {
+  const _AboutCard();
+
+  @override
+  State<_AboutCard> createState() => _AboutCardState();
+}
+
+class _AboutCardState extends State<_AboutCard> {
+  String _version = '';
+
+  @override
+  void initState() {
+    super.initState();
+    PackageInfo.fromPlatform().then((info) {
+      if (mounted) setState(() => _version = info.version);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).extension<SereneTheme>()!.colors;
+    return Container(
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerLow,
+        borderRadius: BorderRadius.all(SereneShape.lg),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _SectionHeader(icon: Icons.info_outline, text: 'About'),
+          const SizedBox(height: 16),
+          Text('CloudRead v$_version',
+              style: SereneType.uiBody.copyWith(color: colors.onSurface)),
+          const SizedBox(height: 8),
+          Text('© 2026 wepexrm-bot',
+              style: SereneType.uiBody.copyWith(color: colors.onSurfaceVariant)),
         ],
       ),
     );

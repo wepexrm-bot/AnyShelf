@@ -1,7 +1,7 @@
 name: cloudread
 description: CloudRead — cloud-native PDF reading app (Serene design)
 publish_to: "none"
-version: 5.3.0+18
+version: 5.7.0+24
 
 environment:
   sdk: ">=3.6.0 <4.0.0"
@@ -12,13 +12,13 @@ dependencies:
   http: ^1.2.2
   http_parser: ^4.0.2
   provider: ^6.1.2
-  syncfusion_flutter_pdfviewer: ^34.1.33 # fixed-layout PDF rendering
-  syncfusion_flutter_core: ^34.1.33 # theme API used to set the PDF background
   shared_preferences: ^2.3.2 # token + small local cache
+  path_provider: ^2.1.4 # on-disk cache of PDFs + extracted text layers
   google_fonts: ^8.2.1
   file_selector: ^1.1.0
   package_info_plus: ^10.2.1
   url_launcher: ^6.3.2
+  pdfrx: ^2.4.7 # PDFium page rendering (real page behind the text layer)
 dev_dependencies:
   flutter_test:
     sdk: flutter

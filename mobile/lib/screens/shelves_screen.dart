@@ -105,6 +105,7 @@ class _ShelvesScreenState extends State<ShelvesScreen> {
 
     return Scaffold(
       floatingActionButton: FloatingActionButton(
+        heroTag: 'add-shelf',
         onPressed: _createShelf,
         backgroundColor: colors.primaryContainer,
         foregroundColor: colors.onPrimaryContainer,

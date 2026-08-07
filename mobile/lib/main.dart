@@ -1,4 +1,8 @@
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 
 import 'screens/auth_screen.dart';
@@ -14,10 +18,49 @@ import 'widgets/forced_update_dialog.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  _installDebugErrorLogger();
   // Wake the backend on launch (Render free tier sleeps after idle), so the
   // first real request doesn't wait out a slow cold start.
   _warmApi();
   runApp(const CloudReadApp());
+}
+
+/// In debug builds, persists every uncaught Flutter error (framework
+/// assertions, build/layout exceptions) to a file in the app support dir so a
+/// crash that can't be reproduced locally can be inspected afterwards via
+/// `adb shell run-as <package> ls/files/...`. Production builds keep the
+/// default handler.
+void _installDebugErrorLogger() {
+  if (kReleaseMode) return;
+  final originalOnError = FlutterError.onError;
+  FlutterError.onError = (FlutterErrorDetails details) {
+    originalOnError?.call(details);
+    // details.toString() includes the informationCollector output, which for
+    // layout problems like RenderFlex overflows carries the widget creator
+    // chain (details.stack is null for those, so the exception message alone
+    // would never tell us which widget overflowed).
+    _appendErrorLog('${details.exceptionAsString()}\n${details.toString()}');
+  };
+  PlatformDispatcher.instance.onError = (error, stack) {
+    _appendErrorLog('$error\n$stack');
+    return false;
+  };
+}
+
+Future<void> _appendErrorLog(String message) async {
+  try {
+    final dir = await getApplicationSupportDirectory();
+    final file = File('${dir.path}/debug_errors.log');
+    final line = '${DateTime.now().toIso8601String()}\n$message\n${'-' * 40}\n';
+    final raf = await file.open(mode: FileMode.append);
+    try {
+      raf.writeStringSync(line);
+    } finally {
+      await raf.close();
+    }
+  } catch (_) {
+    // Logging must never take the app down; swallow all failures.
+  }
 }
 
 Future<void> _warmApi() async {

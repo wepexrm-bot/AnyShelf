@@ -7,6 +7,8 @@ import 'package:http_parser/http_parser.dart';
 import '../models/annotation.dart';
 import '../models/book.dart';
 import 'api_client.dart';
+import 'book_content_cache.dart';
+import 'pdf_renderer.dart';
 
 class BooksService {
   final ApiClient api;
@@ -141,6 +143,12 @@ class BooksService {
     );
   }
 
+  /// Asks the backend to re-run the extraction pipeline for a book, regenerating
+  /// its text layer (and new fields such as per-page `has_image`).
+  Future<void> reExtract(String bookId) async {
+    await api.post('/books/$bookId/re-extract', body: const {});
+  }
+
   /// Reading position for a book (fraction 0..1 across the whole document).
   Future<double> progress(String bookId) async {
     final data = await api.get('/sync/progress/$bookId') as Map;
@@ -181,27 +189,115 @@ class BooksService {
     });
   }
 
-  Future<StructuredText?> structuredText(Book book) async {
+  Future<TextLayer?> textLayer(Book book) async {
     final url = book.structuredTextUrl;
     if (url == null) return null;
+    final cache = BookContentCache.instance;
+    final sourceTag = BookContentCache.sourceTagFrom(url);
+    // Same-session reopen: serve the decoded layer straight from memory, so
+    // reopening a book skips the multi-MB disk read + JSON decode entirely.
+    final inMemory = cache.cachedLayer(book.id);
+    if (inMemory != null) return inMemory;
+    List<int>? body;
+    // Otherwise read the layer from disk when the cached copy is fresh and
+    // still matches the current structured-text URL (skips re-downloading the
+    // multi-MB JSON on every open).
+    if (await cache.isValidLayer(book.id, sourceTag: sourceTag)) {
+      body = await cache.layer(book.id);
+    }
+    if (body == null) {
+      try {
+        final res = await http
+            .get(Uri.parse(url))
+            .timeout(const Duration(seconds: 90)); // pre-signed URL, no auth
+        if (res.statusCode != 200 || res.body.isEmpty) return null;
+        body = res.bodyBytes;
+        await cache.storeLayer(book.id, body, sourceTag: sourceTag);
+      } catch (_) {
+        return null;
+      }
+    }
     try {
-      final res = await http
-          .get(Uri.parse(url))
-          .timeout(const Duration(seconds: 90)); // pre-signed URL, no auth
-      if (res.statusCode != 200 || res.body.isEmpty) return null;
       // Decode off the UI isolate so large books don't jank the reader open.
       // Hand the encoded bytes to the isolate rather than the decoded string,
       // so the main isolate never holds a second (UTF-16) copy of the whole
       // JSON body alongside the isolate's own copy.
-      return await compute(_decodeStructuredText, res.bodyBytes);
+      final layer = await compute(_decodeTextLayer, body);
+      cache.rememberLayer(book.id, layer);
+      return layer;
     } catch (_) {
       return null;
     }
   }
 
-  static StructuredText _decodeStructuredText(List<int> body) {
+  static TextLayer _decodeTextLayer(List<int> body) {
     final text = utf8.decode(body);
-    return StructuredText.fromJson(jsonDecode(text) as Map<String, dynamic>);
+    return TextLayer.fromJson(jsonDecode(text) as Map<String, dynamic>);
+  }
+
+  /// Downloads the raw PDF bytes for pdfrx page rendering. The presigned URL
+  /// needs no auth header; on failure null is returned so the reader falls back
+  /// to text-mode-only (paper + substituted font).
+  ///
+  /// When [bookId] is given the bytes are read from / written to the on-disk
+  /// cache, and a stale cached copy is used as a fallback when the network
+  /// fails (e.g. the presigned URL expired) so the book still opens.
+  Future<Uint8List?> pdfBytes(String pdfUrl, {String? bookId}) async {
+    final cache = BookContentCache.instance;
+    final sourceTag = BookContentCache.sourceTagFrom(pdfUrl);
+    if (bookId != null && await cache.isValidPdf(bookId, sourceTag: sourceTag)) {
+      final cached = await cache.pdf(bookId);
+      if (cached != null) return cached;
+    }
+    try {
+      final res = await http
+          .get(Uri.parse(pdfUrl))
+          .timeout(const Duration(seconds: 90));
+      if (res.statusCode != 200) return _stalePdf(cache, bookId);
+      final bytes = res.bodyBytes;
+      if (bookId != null) {
+        await cache.storePdf(bookId, bytes, sourceTag: sourceTag);
+      }
+      return bytes;
+    } catch (_) {
+      return _stalePdf(cache, bookId);
+    }
+  }
+
+  /// Best-effort fallback to a stale cached copy of the PDF when the fresh
+  /// download fails; returns null when there is nothing cached.
+  Future<Uint8List?> _stalePdf(BookContentCache cache, String? bookId) async {
+    if (bookId == null) return null;
+    return cache.pdf(bookId);
+  }
+
+  // ------------------------------------------------- PDF renderer session
+
+  /// Renderers stay alive for the session (shared across BooksService
+  /// instances) so reopening a book skips the PDFium parse + page re-render.
+  static const int _maxRenderers = 3;
+  static final Map<String, PdfRenderer> _renderers = {};
+
+  /// Returns the session renderer for [bookId], creating one when needed and
+  /// evicting the least-recently-used entry past the cap.
+  static PdfRenderer rendererFor(String bookId) {
+    final existing = _renderers[bookId];
+    if (existing != null) return existing;
+    if (_renderers.length >= _maxRenderers) {
+      final oldest = _renderers.keys.first;
+      _renderers.remove(oldest)?.dispose();
+    }
+    final fresh = PdfRenderer();
+    _renderers[bookId] = fresh;
+    return fresh;
+  }
+
+  /// Drops every cached renderer (logout / account switch).
+  static void clearRenderers() {
+    for (final r in _renderers.values) {
+      r.dispose();
+    }
+    _renderers.clear();
   }
 
   /// Highlights + notes for a book.

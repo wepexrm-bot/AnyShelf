@@ -59,6 +59,36 @@ enum MarginLevel {
   const MarginLevel(this.label, this.px);
 }
 
+/// Single page vs facing-pages spread (tablets only, mirrors web `page_layout`).
+enum PageLayout {
+  single('single'),
+  spread('spread');
+
+  final String apiId;
+  const PageLayout(this.apiId);
+
+  static PageLayout fromApi(String? id) => values.firstWhere(
+        (l) => l.apiId == id,
+        orElse: () => PageLayout.single,
+      );
+}
+
+/// How a single page / spread is fitted to the viewport before the zoom slider
+/// scales it further. `page` always shows the whole page (fits both axes);
+/// `width` fills the width so a tall page pans vertically (Adobe-style).
+enum FitMode {
+  page('page'),
+  width('width');
+
+  final String apiId;
+  const FitMode(this.apiId);
+
+  static FitMode fromApi(String? id) => values.firstWhere(
+        (f) => f.apiId == id,
+        orElse: () => FitMode.page,
+      );
+}
+
 class ReaderSettings {
   ReadingAtmosphere atmosphere;
   ReaderFont font;
@@ -66,7 +96,10 @@ class ReaderSettings {
   LineHeightLevel lineHeight;
   MarginLevel margins;
   ReaderMode mode;
+  PageLayout layout;
+  bool textMode; // substitute fonts on themed paper; false => show real PDF page
   TextAlign textAlign;
+  FitMode fitMode; // local-only page fit (persisted via SharedPreferences)
 
   ReaderSettings({
     required this.atmosphere,
@@ -75,13 +108,16 @@ class ReaderSettings {
     required this.lineHeight,
     required this.margins,
     required this.mode,
+    this.layout = PageLayout.single,
+    this.textMode = true,
     this.textAlign = TextAlign.justify,
+    this.fitMode = FitMode.page,
   });
 
-  factory ReaderSettings.defaults() => ReaderSettings(
+  factory ReaderSettings.defaults() =>       ReaderSettings(
         atmosphere: ReadingAtmosphere.sepia,
         font: ReaderFont.serif,
-        fontSize: 18,
+        fontSize: 20,
         lineHeight: LineHeightLevel.cozy,
         margins: MarginLevel.medium,
         mode: ReaderMode.scroll,
@@ -94,7 +130,10 @@ class ReaderSettings {
     LineHeightLevel? lineHeight,
     MarginLevel? margins,
     ReaderMode? mode,
+    PageLayout? layout,
+    bool? textMode,
     TextAlign? textAlign,
+    FitMode? fitMode,
   }) =>
       ReaderSettings(
         atmosphere: atmosphere ?? this.atmosphere,
@@ -103,11 +142,19 @@ class ReaderSettings {
         lineHeight: lineHeight ?? this.lineHeight,
         margins: margins ?? this.margins,
         mode: mode ?? this.mode,
+        layout: layout ?? this.layout,
+        textMode: textMode ?? this.textMode,
         textAlign: textAlign ?? this.textAlign,
+        fitMode: fitMode ?? this.fitMode,
       );
 
   /// Actual pixel value of the reading font based on the chosen family.
   String get fontFamily => font.googleFamily;
+
+  /// The Appearance "Page Zoom" control: fontSize is repurposed as a zoom
+  /// factor (default 20 = 100%), mirroring the web reader. Scales the whole
+  /// positioned page up/down instead of reflowing text.
+  double get pageZoom => (fontSize / 20).clamp(0.6, 1.6);
 
   /// Maps the local settings onto the backend `/settings/` payload so reading
   /// preferences sync across devices.
@@ -122,6 +169,7 @@ class ReaderSettings {
           MarginLevel.large => 'large',
         },
         'reading_mode': mode == ReaderMode.scroll ? 'scroll' : 'paginate',
+        'page_layout': layout.apiId,
       };
 
   factory ReaderSettings.fromApi(Map<String, dynamic> json) => ReaderSettings(
@@ -147,5 +195,6 @@ class ReaderSettings {
         mode: json['reading_mode'] == 'paginate'
             ? ReaderMode.paginated
             : ReaderMode.scroll,
+        layout: PageLayout.fromApi(json['page_layout'] as String?),
       );
 }

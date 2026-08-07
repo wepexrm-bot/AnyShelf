@@ -254,7 +254,7 @@ class _TypographySection extends StatelessWidget {
               Expanded(
                 child: Slider(
                   value: settings.fontSize,
-                  min: 12,
+                  min: 14,
                   max: 32,
                   activeColor: _primary(context),
                   onChanged: (v) =>
@@ -265,61 +265,70 @@ class _TypographySection extends StatelessWidget {
             ],
           ),
         ),
-        const SizedBox(height: 16),
+        const SizedBox(height: 8),
+        Padding(
+          padding: const EdgeInsets.only(left: 4),
+          child: Text(
+            'Page Zoom  ${(settings.pageZoom * 100).round()}%',
+            style: SereneType.labelSm.copyWith(
+              color: _muted(context),
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
         Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Expanded(
-              child: _MiniPanel(
-                label: 'Line Height',
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    for (final lh in LineHeightLevel.values)
-                      _IconStep(
-                        active: settings.lineHeight == lh,
-                        icon: Icons.format_line_spacing,
-                        size: 16.0 + (lh.index * 6),
-                        onTap: () =>
-                            onChanged(settings.copyWith(lineHeight: lh)),
-                      ),
-                  ],
-                ),
+              child: _LayoutButton(
+                active: settings.fitMode == FitMode.page,
+                icon: Icons.crop_free,
+                label: 'Fit Page',
+                onTap: () =>
+                    onChanged(settings.copyWith(fitMode: FitMode.page)),
               ),
             ),
-            const SizedBox(width: 16),
+            const SizedBox(width: 12),
             Expanded(
-              child: _MiniPanel(
-                label: 'Margins',
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    _IconStep(
-                      active: settings.margins == MarginLevel.small,
-                      icon: Icons.splitscreen,
-                      size: 18,
-                      onTap: () => onChanged(
-                          settings.copyWith(margins: MarginLevel.small)),
-                    ),
-                    _IconStep(
-                      active: settings.margins == MarginLevel.medium,
-                      icon: Icons.horizontal_distribute,
-                      size: 18,
-                      onTap: () => onChanged(
-                          settings.copyWith(margins: MarginLevel.medium)),
-                    ),
-                    _IconStep(
-                      active: settings.margins == MarginLevel.large,
-                      icon: Icons.width_normal,
-                      size: 18,
-                      onTap: () => onChanged(
-                          settings.copyWith(margins: MarginLevel.large)),
-                    ),
-                  ],
-                ),
+              child: _LayoutButton(
+                active: settings.fitMode == FitMode.width,
+                icon: Icons.swap_horiz,
+                label: 'Fit Width',
+                onTap: () =>
+                    onChanged(settings.copyWith(fitMode: FitMode.width)),
               ),
             ),
           ],
+        ),
+        const SizedBox(height: 16),
+        _MiniPanel(
+          label: 'Margins',
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              _IconStep(
+                active: settings.margins == MarginLevel.small,
+                icon: Icons.splitscreen,
+                size: 18,
+                onTap: () =>
+                    onChanged(settings.copyWith(margins: MarginLevel.small)),
+              ),
+              _IconStep(
+                active: settings.margins == MarginLevel.medium,
+                icon: Icons.horizontal_distribute,
+                size: 18,
+                onTap: () => onChanged(
+                    settings.copyWith(margins: MarginLevel.medium)),
+              ),
+              _IconStep(
+                active: settings.margins == MarginLevel.large,
+                icon: Icons.width_normal,
+                size: 18,
+                onTap: () => onChanged(
+                    settings.copyWith(margins: MarginLevel.large)),
+              ),
+            ],
+          ),
         ),
       ],
     );
@@ -478,6 +487,38 @@ class _LayoutSection extends StatelessWidget {
               ),
             ),
           ],
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: _LayoutButton(
+                active: settings.layout == PageLayout.single,
+                icon: Icons.article,
+                label: 'Single page',
+                onTap: () =>
+                    onChanged(settings.copyWith(layout: PageLayout.single)),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _LayoutButton(
+                active: settings.layout == PageLayout.spread,
+                icon: Icons.menu_book,
+                label: 'Spread',
+                onTap: () =>
+                    onChanged(settings.copyWith(layout: PageLayout.spread)),
+              ),
+            ),
+          ],
+        ),
+        Padding(
+          padding: const EdgeInsets.only(top: 12),
+          child: Text(
+            'Spread shows two facing pages side by side. It only applies in '
+            'paginated mode on tablets — phones always show a single page.',
+            style: SereneType.labelSm.copyWith(color: colors.onSurfaceVariant),
+          ),
         ),
         if (!reflowAvailable)
           Padding(

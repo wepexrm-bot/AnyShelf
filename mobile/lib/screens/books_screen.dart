@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:file_selector/file_selector.dart';
@@ -189,6 +190,7 @@ class _BooksScreenState extends State<BooksScreen> {
 
     return Scaffold(
       floatingActionButton: FloatingActionButton(
+        heroTag: 'add-book-books',
         onPressed: () => UploadFlow.showAddSheet(context, onUploaded: (book) async {
           // Optimistic insert: the book shows up immediately; a background
           // reload reconciles cover / extraction status.
@@ -237,8 +239,14 @@ class _BooksScreenState extends State<BooksScreen> {
 
     final filtered = _filtered;
     final screenWidth = MediaQuery.sizeOf(context).width;
-    final columns = _columnCount(screenWidth);
-    final tileWidth = (screenWidth - 48 - (columns - 1) * 16) / columns;
+    // Guard against a transient zero/tiny width during the first frame or a
+    // configuration change: SliverGridDelegateWithFixedCrossAxisCount asserts
+    // childAspectRatio > 0, which crashed the launch build when a degenerate
+    // size was reported mid-transition.
+    final safeWidth = screenWidth > 0 ? screenWidth : 600.0;
+    final columns = _columnCount(safeWidth);
+    final tileWidth =
+        math.max((safeWidth - 48 - (columns - 1) * 16) / columns, 96.0);
     final tileHeight = tileWidth * 3 / 2 + 92;
 
     return RefreshIndicator(

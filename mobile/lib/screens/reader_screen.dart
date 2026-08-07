@@ -1,28 +1,31 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:syncfusion_flutter_core/theme.dart';
-import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart'
-    hide Annotation;
+import 'package:shared_preferences/shared_preferences.dart';
 
-import '../models/book.dart';
 import '../models/annotation.dart';
+import '../models/book.dart';
 import '../models/reader_settings.dart';
+import '../services/book_content_cache.dart';
 import '../services/books_service.dart';
 import '../services/library_refresh.dart';
+import '../services/pdf_renderer.dart';
 import '../services/settings_service.dart';
 import '../theme/reader_atmosphere.dart';
 import '../theme/serene_theme.dart';
 import '../theme/serene_tokens.dart';
+import '../widgets/text_layer_page_view.dart';
 import 'reader_appearance_sheet.dart';
 
-/// The immersive reader. Renders reflowed text (scroll or paginated) with the
-/// chosen atmosphere, or falls back to the fixed PDF when a book isn't
-/// reflowable. Tapping the page toggles the chrome; long-pressing a paragraph
-/// opens the floating highlight menu.
+/// The immersive reader. Renders the positioned text layer (physical PDF pages
+/// with per-line scaleX runs) over the real PDF page rendered by pdfrx, in
+/// scroll or paginated mode, with highlights, notes, bookmarks, TOC, search,
+/// and reading progress. PDF mode shows the real page; text mode substitutes
+/// the chosen font on themed paper.
 class ReaderScreen extends StatefulWidget {
   final Book book;
   const ReaderScreen({super.key, required this.book});
@@ -36,12 +39,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
   final _settingsService = SettingsService();
   final _readingKey = GlobalKey();
   final ScrollController _scrollController = ScrollController();
-  final _BookController _bookController = _BookController();
 
   late ReaderSettings _settings = ReaderSettings.defaults();
-  StructuredText? _structured;
-  String? _pdfUrl; // resolved from GET /books/{id} (list omits pdf_url)
-  double? _reflowConfidence; // from GET /books/{id}; may lag the list snapshot
+  TextLayer? _layer;
+  /// Session-persistent per-book renderer (see BooksService.rendererFor), so
+  /// reopening a book skips the PDFium parse and keeps the page image cache.
+  PdfRenderer get _pdfRenderer => BooksService.rendererFor(widget.book.id);
   bool _uiVisible = false;
   bool _bookmarked = false;
   String? _bookmarkId; // backend annotation id of the current bookmark, if any
@@ -51,23 +54,21 @@ class _ReaderScreenState extends State<ReaderScreen> {
   ReaderSettings? _pendingSettings;
 
   // Text-extraction status: while a freshly uploaded book is still being
-  // processed the structured text isn't ready, so we show a looping extraction
+  // processed the text layer isn't ready, so we show a looping extraction
   // animation and poll until the backend reports "done".
   String? _extractionStatus;
   double? _extractionProgress;
   Timer? _extractionTimer;
 
-  // cached, time-sliced pagination state. Each entry's index is a (possibly
-  // fractional) block anchor so chunks of a split paragraph are addressable
-  // instead of all claiming the same block index.
-  List<List<(TextBlock, double)>>? _pages;
-  String? _pagesKey;
-  Timer? _paginateTimer;
-  bool _paginating = false;
-
-  // highlight state
-  Map<int, String> _highlights = {}; // global block index -> color hex
+  // highlight state: per physical page, char-range highlights.
+  Map<int, List<PageHighlight>> _highlightsByPage = {};
   _HighlightMenuState? _highlightMenu;
+
+  // In-reader "go to page" panel. Deliberately NOT a Navigator route: a route
+  // pop deactivates its Overlay entry while the jump's rebuild runs, which can
+  // trip the framework's `InheritedElement._dependents.isEmpty` assertion.
+  bool _goToPageOpen = false;
+  final TextEditingController _goToPageController = TextEditingController();
 
   // Set when the scroll list should re-position itself to the current reading
   // progress next time it builds (e.g. switching paginated -> scroll).
@@ -78,63 +79,60 @@ class _ReaderScreenState extends State<ReaderScreen> {
   // saved position on the server before the restore completes.
   bool _restoringScroll = false;
 
-  // The exact block the reader is anchored on when switching modes. Captured
-  // at the moment of the switch so scroll & paginated views can both resolve to
-  // the same content instead of a fuzzy progress fraction that drifts a chunk.
-  // Fractional for paragraphs split across pages (see [_paginateInChunks]).
-  double? _anchorBlock;
-
-  // Annotations loaded from the backend, cached for the panel. Populated
-  // lazily so the banner badge and the Highlights & Notes sheet can render
-  // without a second network call.
+  // Annotations loaded from the backend, cached for the panel.
   List<Annotation>? _annotations;
 
-  // page tracking for the footer (paginated mode)
+  // page tracking (physical pages, 0-based index)
   int _currentPage = 0;
   int _pageCount = 0;
 
-  // Single source of truth for reading position across both modes: the global
-  // block index currently on screen (fractional for split-paragraph pages).
-  // Scroll maps the viewport to a block, pagination maps the page to its first
-  // block, and the progress bar (and saved fraction) is always derived from
-  // this same index. This is what keeps scroll and paginated views reporting
-  // the same progress.
-  double? _currentBlock;
-
   // Bumped on every mode switch so the paginated view remounts onto the
-  // anchored block instead of reusing stale flip state.
+  // current page instead of reusing stale state.
   int _anchorSeed = 0;
-
-  // Cached table of scroll offsets for every block. Computing it lays out the
-  // whole book with TextPainters (expensive), so it is time-sliced across
-  // frames rather than blocking the UI thread in one burst, and cached by the
-  // settings that affect layout. While the table is (re)building it reads as
-  // empty and callers fall back to fraction-based positioning.
-  List<double>? _blockOffsetsCache;
-  String? _blockOffsetsCacheKey;
-  bool _blockOffsetsBuilding = false;
-  Timer? _blockOffsetsTimer;
-
-  // Set when a scroll restore has to wait for the offset table to finish
-  // building before it can land on the exact block.
-  double? _pendingScrollRestore;
 
   final ValueNotifier<double> _progressNotifier = ValueNotifier(0);
 
   double get _progress => _progressNotifier.value;
 
-  // Reflow (and thus pagination) is available when the structured text loaded
-  // and the book's reflow confidence is high enough. Prefer the fresh value
-  // from GET /books/{id}: the list snapshot can be stale (extraction was still
-  // running when the card was fetched, so its confidence was null).
-  bool get _reflowAvailable =>
-      (_reflowConfidence ?? widget.book.reflowConfidence ?? 0) >= 0.5 &&
-      _structured != null;
+  // Text-layer reading is available when the positioned layer loaded and has
+  // at least one run (legacy reflow JSON has no runs, so those books fall back
+  // to the fixed PDF until they are re-extracted).
+  bool get _textLayerAvailable => _layer?.hasRuns ?? false;
 
-  /// True while the book's text is still being extracted and structured data
+  /// Pages to render: the positioned text layer's pages when present, else
+  /// fallback pages synthesised from the PDF itself (scanned / run-less books,
+  /// where PDF mode shows the real page behind an empty text layer).
+  List<TextLayerPage> get _renderPages =>
+      (_layer?.pages.isNotEmpty ?? false) ? _layer!.pages : _fallbackPages;
+
+  List<TextLayerPage> _fallbackPages = const [];
+
+  /// Builds fallback page geometry from the opened PDF when a book has no
+  /// text layer (run-less pages still render in PDF mode via pdfrx).
+  Future<void> _buildFallbackPages() async {
+    final count = _pdfRenderer.pageCount;
+    if (count == 0) return;
+    final list = <TextLayerPage>[];
+    for (var i = 0; i < count; i++) {
+      final sz = await _pdfRenderer.pageSize(i);
+      if (sz == null) return;
+      list.add(TextLayerPage(
+        page: i,
+        width: sz.width,
+        height: sz.height,
+        rotation: 0,
+        hasImage: true,
+        runs: const [],
+      ));
+    }
+    if (!mounted) return;
+    setState(() => _fallbackPages = list);
+  }
+
+  /// True while the book's text is still being extracted and the text layer
   /// isn't ready yet. Drives the looping extraction animation.
   bool get _isExtracting =>
-      _structured == null &&
+      _layer == null &&
       _extractionStatus != 'done' &&
       _extractionStatus != 'failed';
 
@@ -148,9 +146,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
   void dispose() {
     _flushProgressSave();
     _flushSettingsSave();
-    _paginateTimer?.cancel();
     _extractionTimer?.cancel();
-    _blockOffsetsTimer?.cancel();
+    _goToPageController.dispose();
+    _paginateController?.dispose();
     _scrollController.dispose();
     _progressNotifier.dispose();
     super.dispose();
@@ -171,23 +169,24 @@ class _ReaderScreenState extends State<ReaderScreen> {
   /// debounced save. Called when leaving the reader so progress is never lost
   /// to the debounce timer.
   void _flushProgressSave() {
-    // Never persist a position the restore is still settling on -- the jump's
-    // viewport may not have reached the saved block yet.
     if (_restoringScroll) return;
     if (_progress > 0) {
-      _booksService.saveProgress(widget.book.id, fraction: _progress);
-      // Mirror into the shared store so "Continue Reading" reflects the new
-      // position without waiting for a reload.
-      LibraryRefresh.instance.applyProgress(widget.book.id, _progress);
+      unawaited(_saveProgressNow());
     }
   }
 
-  /// Kicks off (or reuses) the reader font load and waits for it to finish so
-  /// TextPainter measurements match the rendered text. google_fonts fetches
-  /// the family asynchronously on first use; measuring before it lands caches
-  /// fallback-font metrics that never match the rendered layout, which corrupts
-  /// the scroll offset table (and pagination). Bounded so an offline device
-  /// still opens.
+  /// Saves the current reading position to the backend, ignoring transient
+  /// failures so an offline/backed-up save can never surface as an unhandled
+  /// exception. The local snapshot is always updated regardless.
+  Future<void> _saveProgressNow() async {
+    try {
+      await _booksService.saveProgress(widget.book.id, fraction: _progress);
+    } catch (_) {
+      // Transient or offline failure: the position just isn't persisted yet.
+    }
+    LibraryRefresh.instance.applyProgress(widget.book.id, _progress);
+  }
+
   Future<void> _whenReaderFontLoaded() async {
     // Accessing the reader styles registers the load with google_fonts'
     // pending set, so pendingFonts() below actually waits for it.
@@ -197,7 +196,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       await GoogleFonts.pendingFonts().timeout(const Duration(seconds: 6));
     } catch (_) {
       // Offline / slow network: the fallback font is used for both measurement
-      // and rendering, so the offset table stays self-consistent.
+      // and rendering, so layout stays self-consistent.
     }
   }
 
@@ -205,38 +204,63 @@ class _ReaderScreenState extends State<ReaderScreen> {
     setState(() => _loading = true);
     try {
       final detail = await _booksService.get(widget.book.id);
-      final (settings, bookmark, progress, structured) = await (
+      final (settings, bookmark, progress, layer) = await (
         _settingsService.fetch(),
         _loadBookmark(),
         _booksService.progress(widget.book.id).onError((_, __) => 0.0),
         detail.structuredTextUrl != null
-            ? _booksService.structuredText(detail)
-            : Future<StructuredText?>.value(null),
+            ? _booksService.textLayer(detail)
+            : Future<TextLayer?>.value(null),
       ).wait;
       if (!mounted) return;
       setState(() {
         _settings = settings;
-        _structured = structured;
-        _reflowConfidence = detail.reflowConfidence;
+        _layer = layer;
         _extractionStatus = detail.extractionStatus;
-        _pdfUrl = detail.pdfUrl;
         _progressNotifier.value = progress;
         _bookmarked = bookmark != null;
         _bookmarkId = bookmark;
+        _pageCount = layer?.pages.length ?? 0;
       });
-      // Wait for the reader font before the first render so the offset table
-      // and pagination are measured with the real family, never the fallback.
-      await _whenReaderFontLoaded();
-      if (!mounted) return;
-      setState(() => _loading = false);
+      final hasLayer = (layer?.pages.isNotEmpty ?? false);
+      if (hasLayer) {
+        // The text pages are ready: wait for the reading font so run
+        // measurements use the real family, then paint immediately. The real
+        // PDF opens in the background so PDF-mode / image pages swap in when it
+        // lands -- the reader never waits on the PDF to start reading.
+        await _whenReaderFontLoaded();
+        if (!mounted) return;
+        setState(() {
+          _loading = false;
+          if (progress > 0 && _settings.mode == ReaderMode.paginated) {
+            _currentPage = _pageForFraction(progress);
+          }
+        });
+        _openPdfInBackground(detail.pdfUrl);
+      } else {
+        // No text layer (scanned / legacy reflow): the fallback page geometry
+        // comes from the PDF itself, so it must open before pages exist.
+        final bytes = await _pdfBytesFor(detail.pdfUrl);
+        if (!mounted) return;
+        if (bytes != null && bytes.isNotEmpty) {
+          await _pdfRenderer.open(bytes);
+        }
+        await _buildFallbackPages();
+        if (!mounted) return;
+        await _whenReaderFontLoaded();
+        if (!mounted) return;
+        setState(() {
+          _loading = false;
+          if (progress > 0 && _settings.mode == ReaderMode.paginated) {
+            _currentPage = _pageForFraction(progress);
+          }
+        });
+      }
       if (_settings.mode == ReaderMode.scroll && progress > 0) {
         _restoreScrollOnShow = true;
       }
       _maybeExtractPoll();
       _applySavedHighlights();
-      // Pre-warm the offset table so the first scroll restore/jump after open
-      // doesn't wait for the time-sliced build.
-      _warmBlockOffsets();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -246,12 +270,29 @@ class _ReaderScreenState extends State<ReaderScreen> {
     }
   }
 
-  /// Starts a background poll for a book whose structured text isn't ready
-  /// yet (extraction still running on the backend). The looping extraction
-  /// animation shows until the poll reports "done", then we reload to pull
-  /// the now-available structured text.
+  /// Downloads (or reads from cache) the raw PDF bytes for the reader.
+  Future<Uint8List?> _pdfBytesFor(String? pdfUrl) async {
+    if (pdfUrl == null || pdfUrl.isEmpty) return null;
+    return _booksService.pdfBytes(pdfUrl, bookId: widget.book.id);
+  }
+
+  /// Opens the real PDF without blocking the reader: text pages are already
+  /// painted (paper + substituted font), and pages waiting on the real page
+  /// image re-render when [PdfRenderer.loaded] flips.
+  Future<void> _openPdfInBackground(String? pdfUrl) async {
+    try {
+      final bytes = await _pdfBytesFor(pdfUrl);
+      if (!mounted || bytes == null || bytes.isEmpty) return;
+      await _pdfRenderer.open(bytes);
+      if (mounted) setState(() {});
+    } catch (_) {
+      // Text mode keeps the book fully readable; a PDF failure only costs the
+      // real-page backdrop for image / PDF-mode pages.
+    }
+  }
+
   void _maybeExtractPoll() {
-    if (_structured != null) {
+    if (_layer != null) {
       _extractionTimer?.cancel();
       _extractionTimer = null;
       return;
@@ -286,37 +327,19 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   void _updateSettings(ReaderSettings next) {
     final modeChanged = next.mode != _settings.mode;
-    final fontChanged = next.font != _settings.font;
     if (modeChanged) {
-      // Capture which block is current *before* switching, so the new view can
-      // land on the same content (not a fuzzy fraction that drifts a chapter).
-      _anchorBlock = _captureAnchorBlock();
-      // Force the paginated view to remount onto the anchored page instead of
-      // reusing stale per-mode flip state (same _pagesKey across a switch).
+      // The paginated view remounts onto the current page on switch.
       _anchorSeed++;
-    }
-    if (fontChanged) {
-      _blockOffsetsCache = null;
-      _blockOffsetsCacheKey = null;
     }
     setState(() {
       _settings = next;
       if (next.mode == ReaderMode.scroll) _restoreScrollOnShow = true;
     });
-    if (fontChanged) {
-      // The new family loads asynchronously; re-measure once it lands so the
-      // offset table matches the freshly rendered layout.
-      _whenReaderFontLoaded().then((_) {
-        if (!mounted) return;
-        setState(() {
-          _blockOffsetsCache = null;
-          _blockOffsetsCacheKey = null;
-        });
-        _syncBlockFromScroll();
-        _warmBlockOffsets();
-      });
-    }
-    _warmBlockOffsets();
+    // The page fit is local-only (not in the backend settings contract), so it
+    // is persisted through SharedPreferences like the text-mode toggle.
+    SharedPreferences.getInstance().then(
+      (prefs) => prefs.setString('reader_fit_mode', next.fitMode.apiId),
+    );
     _saveTimer?.cancel();
     _saveTimer = Timer(const Duration(milliseconds: 400), () {
       _pendingSettings = null;
@@ -325,7 +348,37 @@ class _ReaderScreenState extends State<ReaderScreen> {
     _pendingSettings = next;
   }
 
-  /// Finds the synced bookmark annotation id for this book, if one exists.
+  /// Toggles between text mode (substituted font on themed paper) and PDF mode
+  /// (the real page rendered by pdfrx). Persisted locally, like the web
+  /// reader's `reader_textmode` preference.
+  void _toggleTextMode() {
+    setState(() => _settings = _settings.copyWith(textMode: !_settings.textMode));
+    SharedPreferences.getInstance().then(
+      (prefs) => prefs.setBool('reader_textmode', _settings.textMode),
+    );
+  }
+
+  /// Triggers a backend re-extraction of the book's text layer, then reloads
+  /// the layer (and the PDF) so newly added fields like `has_image` appear.
+  /// Mirrors the web reader's re-extract button.
+  Future<void> _reExtract() async {
+    setState(() {
+      _extractionStatus = 'processing';
+      _extractionProgress = 0;
+      _layer = null;
+      _fallbackPages = const [];
+    });
+    // The backend is about to produce a new layer + PDF; drop the stale copies
+    // so the reload after extraction can't serve old content from disk.
+    await BookContentCache.instance.invalidate(widget.book.id);
+    _maybeExtractPoll();
+    try {
+      await _booksService.reExtract(widget.book.id);
+    } catch (_) {
+      // The status poll below reflects the real state; a failure here is fine.
+    }
+  }
+
   Future<String?> _loadBookmark() async {
     try {
       final notes = await _booksService.annotations(widget.book.id);
@@ -354,7 +407,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
           .post('/sync/annotations', body: {
         'book_id': widget.book.id,
         'kind': 'bookmark',
-        'anchor': '',
+        'anchor': 'Page ${_currentPage + 1}',
       });
       if (res is Map && res['id'] != null) {
         if (!mounted) return;
@@ -366,28 +419,58 @@ class _ReaderScreenState extends State<ReaderScreen> {
     }
   }
 
+  /// Parse a char-range anchor `{page,start_char,end_char}` if present.
+  ({int page, int start, int end})? _parseCharAnchor(String? anchor) {
+    if (anchor == null || !anchor.startsWith('{')) return null;
+    try {
+      final m = jsonDecode(anchor);
+      if (m is Map &&
+          m['page'] is int &&
+          m['start_char'] is int &&
+          m['end_char'] is int) {
+        return (
+          page: m['page'] as int,
+          start: m['start_char'] as int,
+          end: m['end_char'] as int,
+        );
+      }
+    } catch (_) {}
+    return null;
+  }
+
   /// Reconcile saved annotations (user highlights + imported PDF highlights)
-  /// against the reflowed blocks so they render in both scroll and paginated
+  /// into per-page char ranges so they render in both scroll and paginated
   /// modes without requiring the user to re-select them.
   Future<void> _applySavedHighlights() async {
     final anns = await _loadAnnotations();
-    if (anns.isEmpty) return;
-    final blocks = _structured?.allBlocks;
-    if (blocks == null || blocks.isEmpty) return;
-    final merged = Map<int, String>.from(_highlights);
+    final byPage = <int, List<PageHighlight>>{};
     for (final a in anns) {
       if (a.kind != 'highlight') continue;
+      final color = _parseColor(
+        a.color ?? (a.importedFromPdf ? '#8BC34A' : '#FFD54F'),
+        fallback: _settings.atmosphere.accent,
+      );
+      final parsed = _parseCharAnchor(a.anchor);
+      if (parsed != null && parsed.page >= 0 && parsed.page < (_layer?.pages.length ?? 0)) {
+        byPage
+            .putIfAbsent(parsed.page, () => [])
+            .add(PageHighlight(start: parsed.start, end: parsed.end, color: color));
+        continue;
+      }
       final text = a.anchoredText;
       if (text == null || text.isEmpty) continue;
-      for (var i = 0; i < blocks.length; i++) {
-        if (blocks[i].text.contains(text)) {
-          merged[i] = a.color ?? (a.importedFromPdf ? '#8BC34A' : '#FFD54F');
+      for (var p = 0; p < (_layer?.pages.length ?? 0); p++) {
+        final idx = _layer!.pages[p].text.indexOf(text);
+        if (idx >= 0) {
+          byPage
+              .putIfAbsent(p, () => [])
+              .add(PageHighlight(start: idx, end: idx + text.length, color: color));
           break;
         }
       }
     }
     if (!mounted) return;
-    setState(() => _highlights = merged);
+    setState(() => _highlightsByPage = byPage);
   }
 
   Future<List<Annotation>> _loadAnnotations() async {
@@ -403,7 +486,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
   Future<void> _openAnnotations() async {
     final anns = await _loadAnnotations();
     if (!mounted) return;
-    final blocks = _structured?.allBlocks ?? [];
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -411,50 +493,75 @@ class _ReaderScreenState extends State<ReaderScreen> {
       backgroundColor: Colors.transparent,
       builder: (_) => _AnnotationsSheet(
         annotations: anns,
-        blocks: blocks,
         atmosphere: _settings.atmosphere,
-        onTapHighlight: (String text) => _scrollToAnnotatedText(text, blocks),
+        canTap: _textLayerAvailable,
+        onTapHighlight: _scrollToAnnotatedText,
       ),
     );
   }
 
-  void _scrollToAnnotatedText(String text, List<TextBlock> blocks) {
-    if (blocks.isEmpty) return;
-    for (var i = 0; i < blocks.length; i++) {
-      if (blocks[i].text.contains(text)) {
-        final progress = blocks.length > 1 ? i / (blocks.length - 1) : 0.0;
-        _updateProgress(progress);
-        _scrollToProgress(progress);
+  void _scrollToAnnotatedText(String text) {
+    if (!_textLayerAvailable) return;
+    for (var p = 0; p < _layer!.pages.length; p++) {
+      if (_layer!.pages[p].text.contains(text)) {
+        _jumpToPage(p);
         return;
       }
     }
   }
 
+  /// Jump to a physical page (0-based) in whichever mode is active.
+  void _jumpToPage(int page) {
+    final idx = page.clamp(0, math.max(0, _renderPages.length - 1)).toInt();
+    setState(() => _currentPage = idx);
+    _onPageShown(idx);
+    if (_settings.mode == ReaderMode.paginated) {
+      if (_paginateController?.hasClients ?? false) {
+        final spread = _spreadActive;
+        final target = spread ? idx ~/ 2 : idx;
+        // Defer the actual jump to the end of the frame: jumpToPage fires
+        // `onPageChanged` synchronously (a second setState), so running it
+        // post-frame keeps that churn out of any in-progress element
+        // deactivation the current frame is walking.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && (_paginateController?.hasClients ?? false)) {
+            _paginateController!.jumpToPage(target);
+          }
+        });
+      }
+    } else {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scrollController.hasClients) {
+          _restoreScrollToTarget(_scrollOffsetForPage(idx));
+        }
+      });
+    }
+  }
+
+  /// Tablet-only double-page spread (web `page_layout: spread`). Phones always
+  /// get a single page regardless of the setting.
+  bool get _spreadActive =>
+      MediaQuery.sizeOf(context).shortestSide >= 600 &&
+      _settings.layout == PageLayout.spread;
+
   double get _fontSize => _settings.fontSize;
-  double get _lineSpacing => _settings.lineHeight.value;
   double get _readingInset => _clampReadingInset(MediaQuery.sizeOf(context).width);
 
   double _clampReadingInset(double width) {
     final factor = switch (_settings.margins) {
-      MarginLevel.small => 0.06,
-      MarginLevel.medium => 0.09,
-      MarginLevel.large => 0.12,
+      MarginLevel.small => 0.05,
+      MarginLevel.medium => 0.07,
+      MarginLevel.large => 0.1,
     };
-    return (width * factor).clamp(24.0, 96.0);
+    return (width * factor).clamp(16.0, 64.0);
   }
 
   TextStyle get _bodyStyle => GoogleFonts.getFont(
         _settings.fontFamily,
         textStyle: TextStyle(
           fontSize: _fontSize,
-          height: _lineSpacing,
           color: _settings.atmosphere.text,
         ),
-      );
-
-  TextStyle get _headingStyle => _bodyStyle.copyWith(
-        fontSize: _fontSize * 1.3,
-        fontWeight: FontWeight.w700,
       );
 
   @override
@@ -508,6 +615,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
           if (_highlightMenu != null) _buildHighlightMenu(),
           _buildTopBar(),
           _buildBottomBar(),
+          _buildGoToPagePanel(),
         ],
       ),
     );
@@ -532,9 +640,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final moved = (e.position - down).distance > 14;
     final quick = DateTime.now().difference(_tapDownAt) <
         const Duration(milliseconds: 400);
-    // In paginated reflow mode the page view owns taps (tap zones flip pages,
-    // the centre toggles chrome); everywhere else a quick tap toggles chrome.
-    if (_reflowAvailable && _settings.mode == ReaderMode.paginated) return;
+    // In paginated text-layer mode the page view owns taps (tap zones flip
+    // pages, the centre toggles chrome); everywhere else a quick tap toggles.
+    if (_textLayerAvailable && _settings.mode == ReaderMode.paginated) return;
     if (!moved && quick) _toggleChrome();
   }
 
@@ -549,14 +657,23 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   Widget _readingSurface() {
     if (_isExtracting) return _extractionView();
-    if (!_reflowAvailable) return _fixedPdfView();
+    if (_renderPages.isEmpty) return _fixedPdfUnavailableView();
     return _settings.mode == ReaderMode.scroll
         ? _scrollView()
         : _paginatedView();
   }
 
-  /// Looping circular extraction animation shown while the backend is still
-  /// processing the book's text. Renders the reader the moment it completes.
+  Widget _fixedPdfUnavailableView() {
+    return Container(
+      color: Colors.black,
+      child: Center(
+        child: Text('PDF unavailable',
+            style: SereneType.uiBody
+                .copyWith(color: _settings.atmosphere.text)),
+      ),
+    );
+  }
+
   Widget _extractionView() {
     final progress = (_extractionProgress ?? 0).clamp(0, 100).toInt();
     return Center(
@@ -567,7 +684,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
             width: 72,
             height: 72,
             child: CircularProgressIndicator(
-              value: null, // indeterminate -- spins until extraction completes
+              value: null,
               strokeWidth: 6,
               color: _settings.atmosphere.accent,
               backgroundColor: _settings.atmosphere.text.withValues(alpha: 0.08),
@@ -583,34 +700,72 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
-  Widget _fixedPdfView() {
-    final url = _pdfUrl;
-    return Container(
-      color: Colors.black,
-      child: url == null || url.isEmpty
-          ? Center(
-              child: Text('PDF unavailable',
-                  style: SereneType.uiBody
-                      .copyWith(color: _settings.atmosphere.text)),
-            )
-          : SfPdfViewerTheme(
-              data: SfPdfViewerThemeData(
-                backgroundColor: Colors.black,
-                progressBarColor: _settings.atmosphere.accent,
-              ),
-              child: SfPdfViewer.network(
-                url,
-                pageSpacing: 0,
-                canShowScrollHead: false,
-                canShowPaginationDialog: false,
-                enableDoubleTapZooming: true,
-              ),
-            ),
-    );
+  // --------------------------------------------------------- page geometry
+
+  /// Width each rendered page gets in scroll mode: full available width.
+  double get _scrollRenderWidth =>
+      ((MediaQuery.sizeOf(context).width - 2 * _readingInset)
+              .clamp(160.0, 900.0)) *
+          _settings.pageZoom;
+
+  double _pageBoxHeight(TextLayerPage p) => _scrollRenderWidth * (p.height / p.width);
+
+  static const double _pageGap = 24;
+  static const double _scrollTopPadFactor = 0.06;
+
+  double get _scrollTopPad => MediaQuery.sizeOf(context).height * _scrollTopPadFactor;
+
+  /// Deterministic top offset of every page (no TextPainter measurement
+  /// needed -- page heights come straight from the page aspect ratio).
+  List<double> _scrollOffsets() {
+    final out = <double>[];
+    var y = _scrollTopPad;
+    for (final p in _renderPages) {
+      out.add(y);
+      y += _pageBoxHeight(p) + _pageGap;
+    }
+    return out;
   }
 
+  double _scrollOffsetForPage(int page) {
+    final offsets = _scrollOffsets();
+    return offsets[page.clamp(0, offsets.length - 1)];
+  }
+
+  /// The page index for a reading fraction, from the text layer's char counts
+  /// when available, else a page-based approximation (run-less books).
+  int _pageForFraction(double fraction) {
+    final layer = _layer;
+    if (layer != null && layer.totalChars > 0) {
+      return layer.pageForFraction(fraction);
+    }
+    final count = _renderPages.length;
+    if (count == 0) return 0;
+    return (fraction.clamp(0.0, 0.9999) * count).floor().clamp(0, count - 1);
+  }
+
+  int? _topVisiblePageInScroll() {
+    if (!_scrollController.hasClients) return null;
+    final px = _scrollController.position.pixels - _scrollTopPad + 2;
+    final offsets = _scrollOffsets();
+    var lo = 0;
+    var hi = offsets.length - 1;
+    var idx = 0;
+    while (lo <= hi) {
+      final mid = (lo + hi) >> 1;
+      if (offsets[mid] <= px) {
+        idx = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return idx;
+  }
+
+  // ------------------------------------------------------------------ scroll
+
   Widget _scrollView() {
-    final blocks = _structured!.allBlocks;
     if (_restoreScrollOnShow) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _restoreScrollPosition());
       _restoreScrollOnShow = false;
@@ -621,63 +776,59 @@ class _ReaderScreenState extends State<ReaderScreen> {
         controller: _scrollController,
         padding: EdgeInsets.fromLTRB(
           _readingInset,
-          MediaQuery.sizeOf(context).height * 0.1,
+          _scrollTopPad,
           _readingInset,
           140,
         ),
-        itemCount: blocks.length,
-        itemBuilder: (context, index) => _buildBlock(blocks[index], index),
+        itemCount: _renderPages.length,
+        itemBuilder: (context, i) {
+          final page = _renderPages[i];
+          final rw = _scrollRenderWidth;
+          return Padding(
+            padding: const EdgeInsets.only(bottom: _pageGap),
+            child: Center(
+              child: LayoutBuilder(
+                builder: (context, cons) {
+                  final viewport = cons.maxWidth;
+                  // Zoom can push the page past the screen width. When that
+                  // happens the card keeps its full zoomed size and the
+                  // horizontal scroll view lets the reader pan to the rest
+                  // (text stays inside the card); when it fits, it centers.
+                  return SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: SizedBox(
+                      width: math.max(viewport, rw),
+                      child: Center(
+                        child: TextLayerPageView(
+                          page: page,
+                          renderWidth: rw,
+                          settings: _settings,
+                          paper: _paperFor(_settings.atmosphere),
+                          pdf: _pdfRenderer,
+                          highlights: _highlightsByPage[i] ?? const [],
+                          onWordLongPress: (global, rect, s, e, t) =>
+                              _onWordLongPress(i, global, s, e, t),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          );
+        },
       ),
     );
   }
 
-  /// Jump the scroll list to the exact block the reader was on (captured when
-  /// leaving paginated mode), so switching views keeps the same content rather
-  /// than drifting back a chapter. Falls back to a progress fraction when no
-  /// block anchor exists (e.g. opening fresh in scroll mode).
   void _restoreScrollPosition() {
     if (!_scrollController.hasClients) return;
     final max = _scrollController.position.maxScrollExtent;
     if (max <= 0) return;
-    // Prefer an explicit block anchor; otherwise turn the saved block-based
-    // fraction back into a block, then into a pixel offset -- never use the raw
-    // fraction as pixels, since progress is block-derived.
-    var target = _scrollOffsetForBlock(_anchorBlock);
-    if (target == null) {
-      final block = _fractionToBlock(_progress);
-      target = block != null ? _scrollOffsetForBlock(block) : (_progress * max);
-    }
-    if (target == null) {
-      // The offset table is still building; retry the restore once it lands.
-      _pendingScrollRestore = _progress;
-      return;
-    }
-    _restoreScrollToTarget(target);
+    final page = _pageForFraction(_progress);
+    _restoreScrollToTarget(_scrollOffsetForPage(page));
   }
 
-  /// Completes a scroll restore that had to wait for the offset table to
-  /// finish building.
-  void _applyPendingScrollRestore() {
-    final pending = _pendingScrollRestore;
-    if (pending == null) return;
-    _pendingScrollRestore = null;
-    if (!_scrollController.hasClients) return;
-    final max = _scrollController.position.maxScrollExtent;
-    if (max <= 0) return;
-    final block = _fractionToBlock(pending);
-    final target = block != null ? _scrollOffsetForBlock(block) : pending * max;
-    if (target == null) return;
-    _restoreScrollToTarget(target);
-  }
-
-  /// Jump the scroll list to the exact pixel the reader was on. The lazy
-  /// ListView reports a growing (estimate-based) maxScrollExtent while items
-  /// are still being built, so a single jump clamps to a stale ceiling and
-  /// lands mid-book (e.g. a 72% restore lands at ~39%). Re-apply the jump each
-  /// frame until the extent has grown past the target (or a frame budget
-  /// expires), then settle: re-derive the block so saved progress matches the
-  /// viewport, and release the persist-suppression flag only once the viewport
-  /// has truly settled.
   void _restoreScrollToTarget(double target, {int frameBudget = 120}) {
     if (!mounted || !_scrollController.hasClients) return;
     _restoringScroll = true;
@@ -691,482 +842,123 @@ class _ReaderScreenState extends State<ReaderScreen> {
       });
       return;
     }
-    _anchorBlock = null;
-    _syncBlockFromScroll();
+    _syncPageFromScroll();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _restoringScroll = false;
     });
   }
 
-  /// Build a table of the top offset of every reflowed block, measured the
-  /// same way the paginator measures them (TextPainter + the same bottom
-  /// padding as [_buildBlock]), so a block index maps deterministically to a
-  /// scroll pixel. Cached by the settings that affect layout. Measuring the
-  /// whole book with TextPainters is expensive, so large books are measured
-  /// time-sliced across frames (the table reads empty until it lands, and
-  /// callers fall back to fraction-based positioning); small books measure
-  /// synchronously so the first render lands on the exact block.
-  List<double> _blockOffsets(List<TextBlock> blocks, double width) {
-    // Measure with the same text scaler the rendered Text widgets use, or the
-    // table silently underestimates every block (device font scaling > 1) and
-    // restore/jump land at an earlier block than requested.
-    final ts = MediaQuery.textScalerOf(context);
-    final key = '${_settings.font.googleFamily}|'
-        '${_fontSize.toStringAsFixed(2)}|'
-        '${_lineSpacing.toStringAsFixed(3)}|'
-        '${_readingInset.toStringAsFixed(1)}|'
-        '${width.toStringAsFixed(1)}|'
-        '${ts.scale(1).toStringAsFixed(4)}';
-    if (_blockOffsetsCache != null && _blockOffsetsCacheKey == key) {
-      return _blockOffsetsCache!;
-    }
-    if (_blockOffsetsBuilding) return const [];
-    if (blocks.length <= _syncOffsetsBlockLimit) {
-      final offsets = _measureOffsets(blocks, width, ts);
-      _blockOffsetsCache = offsets;
-      _blockOffsetsCacheKey = key;
-      return offsets;
-    }
-    _startBlockOffsetsBuild(blocks, width, key, ts);
-    return const [];
+  bool _onScroll(ScrollNotification n) {
+    if (n.metrics.maxScrollExtent > 0) _syncPageFromScroll();
+    return false;
   }
 
-  /// Synchronously measures the full-book offset table.
-  List<double> _measureOffsets(
-      List<TextBlock> blocks, double width, TextScaler ts) {
-    final offsets = <double>[];
-    var y = 0.0;
-    for (final b in blocks) {
-      offsets.add(y);
-      final style = b.isHeading ? _headingStyle : _bodyStyle;
-      final tp = TextPainter(
-        text: TextSpan(text: b.text, style: style),
-        textDirection: TextDirection.ltr,
-        textScaler: ts,
-      )..layout(maxWidth: width);
-      y += tp.height + (b.isHeading ? 12 : 20);
-      tp.dispose();
-    }
-    return offsets;
-  }
-
-  /// Books larger than this measure their offset table off the critical path;
-  /// smaller ones build it synchronously (fast enough to avoid a visible
-  /// restore flash).
-  static const int _syncOffsetsBlockLimit = 400;
-
-  /// Time-slices the full-book offset measurement across frames so the UI
-  /// thread never blocks in one TextPainter burst.
-  void _startBlockOffsetsBuild(
-      List<TextBlock> blocks, double width, String key, TextScaler ts) {
-    _blockOffsetsBuilding = true;
-    _blockOffsetsCache = null;
-    _blockOffsetsCacheKey = null;
-    final offsets = <double>[];
-    var y = 0.0;
-    var i = 0;
-    _blockOffsetsTimer?.cancel();
-    _blockOffsetsTimer = Timer.periodic(const Duration(milliseconds: 16), (timer) {
-      final deadline = DateTime.now().add(const Duration(milliseconds: 8));
-      while (i < blocks.length && DateTime.now().isBefore(deadline)) {
-        final b = blocks[i];
-        offsets.add(y);
-        final style = b.isHeading ? _headingStyle : _bodyStyle;
-        final tp = TextPainter(
-          text: TextSpan(text: b.text, style: style),
-          textDirection: TextDirection.ltr,
-          textScaler: ts,
-        )..layout(maxWidth: width);
-        y += tp.height + (b.isHeading ? 12 : 20);
-        tp.dispose();
-        i++;
-      }
-      if (i >= blocks.length) {
-        timer.cancel();
-        _blockOffsetsTimer = null;
-        _blockOffsetsBuilding = false;
-        if (!mounted) return;
-        setState(() {
-          _blockOffsetsCache = offsets;
-          _blockOffsetsCacheKey = key;
-        });
-        _applyPendingScrollRestore();
-      }
-    });
-  }
-
-  /// Pre-warm the offset table so the first scroll restore / jump after a load
-  /// or settings change doesn't have to wait for it.
-  void _warmBlockOffsets() {
-    final blocks = _structured?.allBlocks;
-    if (blocks == null || blocks.isEmpty) return;
-    if (_settings.mode != ReaderMode.scroll) return;
-    _blockOffsets(blocks, _scrollContentWidth());
-  }
-
-  double _scrollContentWidth() =>
-      MediaQuery.sizeOf(context).width - 2 * _readingInset;
-
-  double? _scrollOffsetForBlock(double? blockIndex) {
-    final blocks = _structured?.allBlocks;
-    if (blockIndex == null || blocks == null) return null;
-    if (blockIndex >= blocks.length) return null;
-    final offsets = _blockOffsets(blocks, _scrollContentWidth());
-    if (offsets.isEmpty) return null; // offset table still building
-    final topPad = MediaQuery.sizeOf(context).height * 0.1;
-    final base = blockIndex.floor();
-    if (base >= offsets.length) return topPad + offsets.last;
-    final frac = blockIndex - base;
-    if (frac <= 0.001) return topPad + offsets[base];
-    // Interpolate between neighbouring block tops so a fractional anchor (a
-    // chunk of a split paragraph) lands inside the paragraph, not at its top.
-    final next = base + 1 < offsets.length ? offsets[base + 1] : offsets[base];
-    return topPad + offsets[base] + (next - offsets[base]) * frac;
-  }
-
-  /// The global block index currently at the top of the scroll viewport.
-  int? _topVisibleBlockInScroll() {
-    if (!_scrollController.hasClients) return null;
-    final blocks = _structured?.allBlocks;
-    if (blocks == null || blocks.isEmpty) return null;
-    final offsets = _blockOffsets(blocks, _scrollContentWidth());
-    if (offsets.isEmpty) return null; // offset table still building
-    final topPad = MediaQuery.sizeOf(context).height * 0.1;
-    final pixels = _scrollController.position.pixels - topPad + 2;
-    // Binary search for the last block whose top offset is above the viewport
-    // top (offsets are monotonically increasing).
-    var lo = 0;
-    var hi = offsets.length - 1;
-    var index = 0;
-    while (lo <= hi) {
-      final mid = (lo + hi) >> 1;
-      if (offsets[mid] <= pixels) {
-        index = mid;
-        lo = mid + 1;
-      } else {
-        hi = mid - 1;
-      }
-    }
-    return index;
-  }
-
-  /// Reads which block the *current* mode is showing, so we can re-anchor the
-  /// other mode to the same content on switch. Fractional for chunk pages.
-  double? _captureAnchorBlock() {
-    if (_settings.mode == ReaderMode.paginated) {
-      final pages = _pages;
-      if (pages == null || pages.isEmpty) return null;
-      final pageIndex = (_currentPage - 1).clamp(0, pages.length - 1);
-      return pages[pageIndex].first.$2;
-    }
-    if (_settings.mode == ReaderMode.scroll) {
-      return _topVisibleBlockInScroll()?.toDouble();
-    }
-    return null;
-  }
-
-  /// The page whose block range contains [blockIndex], else -1.
-  int _pageForBlock(double blockIndex, List<List<(TextBlock, double)>> pages) {
-    for (var pi = 0; pi < pages.length; pi++) {
-      final p = pages[pi];
-      if (blockIndex >= p.first.$2 && blockIndex <= p.last.$2) return pi;
-    }
-    return -1;
-  }
-
-  Widget _paginatedView() {
-    _ensurePaginated();
-    final pages = _pages;
-    if (pages == null || pages.isEmpty) {
-      return const Center(child: CircularProgressIndicator());
-    }
-    // Land on the block the reader was on before switching (e.g. scroll ->
-    // paginated). Fall back to the progress fraction.
-    var initial = 0;
-    if (_anchorBlock != null) {
-      final byBlock = _pageForBlock(_anchorBlock!, pages);
-      if (byBlock >= 0) initial = byBlock;
-      _anchorBlock = null;
-    } else {
-      // No explicit anchor: stay on the current page/block, or on a fresh open
-      // (block unknown) derive the block from the saved progress fraction so
-      // the reader resumes where the user left off.
-      final startBlock =
-          _currentBlock ?? (_fractionToBlock(_progress) ?? 0.0);
-      initial = _pageForBlock(startBlock, pages);
-      if (initial < 0) {
-        initial = pages.length > 1
-            ? (_progress * (pages.length - 1)).round().clamp(0, pages.length - 1)
-            : 0;
-      }
-    }
-    return _SinglePageView(
-      key: ValueKey('book-${_pagesKey ?? ''}-nav-$_anchorSeed'),
-      pages: pages,
-      settings: _settings,
-      controller: _bookController,
-      initialPage: initial,
-      onPageChanged: (i, total) => _onPageChanged(i, total),
-      onToggleChrome: _toggleChrome,
-    );
-  }
-
-  Widget _buildBlock(TextBlock block, int globalIndex) {
-    final isHeading = block.isHeading;
-    final highlightColor = _highlights[globalIndex];
-    final style = isHeading ? _headingStyle : _bodyStyle;
-    return Padding(
-      padding: EdgeInsets.only(bottom: isHeading ? 12 : 20),
-      child: GestureDetector(
-        onLongPressStart: (details) => _onLongPress(globalIndex, block, details),
-        child: Container(
-          color: highlightColor != null
-              ? _parseColor(highlightColor,
-                  fallback: _settings.atmosphere.accent)
-              : null,
-          child: Text(block.text, style: style, textAlign: _settings.textAlign),
-        ),
-      ),
-    );
-  }
-
-  // ------------------------------------------------------------- pagination
-
-  /// Dimensions of the single page and its text area. The page fills the whole
-  /// reader width at full screen height. The text area is padded so it clears
-  /// the overlay header/footer and leaves room for the page number.
-  ({double pageW, double pageH, double textW, double textH}) _bookGeometry(
-      Size screen) {
-    const padX = 36.0;
-    const padTop = 88.0;
-    const padBottom = 160.0;
-    final pageW = screen.width;
-    final pageH = screen.height;
-    final textW = (pageW - padX * 2).clamp(80.0, 1200.0);
-    final textH = (pageH - padTop - padBottom).clamp(80.0, 2000.0);
-    return (pageW: pageW, pageH: pageH, textW: textW, textH: textH);
-  }
-
-  String _paginateKey() {
-    final g = _bookGeometry(MediaQuery.sizeOf(context));
-    return '${_settings.fontFamily}|${_fontSize.toStringAsFixed(2)}|'
-        '${_lineSpacing.toStringAsFixed(3)}|'
-        '${g.pageW.toStringAsFixed(1)}|${g.pageH.toStringAsFixed(1)}|'
-        '${g.textW.toStringAsFixed(1)}|${g.textH.toStringAsFixed(1)}';
-  }
-
-  /// Lazily (re)computes the page layout. Measurement is time-sliced across
-  /// frames so the UI thread never blocks, and the result is cached keyed by
-  /// the settings that affect layout, so taps/builds don't re-paginate.
-  void _ensurePaginated() {
-    if (!_reflowAvailable || _settings.mode != ReaderMode.paginated) return;
-    final key = _paginateKey();
-    if (_pages != null && _pagesKey == key) return;
-    if (_paginating) return;
-    _paginating = true;
-    _pages = null;
-    _paginateInChunks(key);
-  }
-
-  void _paginateInChunks(String key) {
-    final blocks = _structured!.allBlocks;
-    if (blocks.isEmpty) {
-      _pages = [];
-      _pagesKey = key;
-      _paginating = false;
-      return;
-    }
-    final g = _bookGeometry(MediaQuery.sizeOf(context));
-    final width = g.textW;
-    // Leave a small safety margin under the measured text height so pages
-    // never clip the last line if rendered metrics drift from the measured
-    // ones (async font loads etc.).
-    final height = g.textH - 16;
-    final pages = <List<(TextBlock, double)>>[];
-    var current = <(TextBlock, double)>[];
-    var used = 0.0;
-    var i = 0;
-
-    _paginateTimer?.cancel();
-    _paginateTimer = Timer.periodic(const Duration(milliseconds: 16), (timer) {
-      final deadline = DateTime.now().add(const Duration(milliseconds: 8));
-      while (i < blocks.length && DateTime.now().isBefore(deadline)) {
-        final b = blocks[i];
-        final style = b.isHeading ? _headingStyle : _bodyStyle;
-        final tp = TextPainter(
-          text: TextSpan(text: b.text, style: style),
-          textDirection: TextDirection.ltr,
-          textScaler: MediaQuery.textScalerOf(context),
-        )..layout(maxWidth: width);
-        final blockHeight = tp.height + (b.isHeading ? 12 : 20);
-        tp.dispose();
-
-        if (blockHeight > height) {
-          if (current.isNotEmpty) {
-            pages.add(current);
-            current = <(TextBlock, double)>[];
-            used = 0;
-          }
-          final chunks = _splitParagraph(b, width, height);
-          // Give each chunk a distinct fractional anchor (i, i+1/n, ...) so a
-          // page holding a piece of a long paragraph is addressable for
-          // progress, seek, and mode-switch anchoring -- sharing block i would
-          // make every chunk page report the same position and drift the
-          // reader to the start of the paragraph on switch.
-          final n = chunks.length;
-          for (var k = 0; k < n; k++) {
-            pages.add([
-              (TextBlock(kind: b.kind, text: chunks[k], level: b.level),
-                  i + k / n)
-            ]);
-          }
-        } else {
-          if (current.isNotEmpty && used + blockHeight > height) {
-            pages.add(current);
-            current = <(TextBlock, double)>[];
-            used = 0;
-          }
-          current.add((b, i.toDouble()));
-          used += blockHeight;
-        }
-        i++;
-      }
-      if (i >= blocks.length) {
-        timer.cancel();
-        _paginateTimer = null;
-        if (current.isNotEmpty) pages.add(current);
-        if (!mounted) return;
-        setState(() {
-          _pages = pages;
-          _pagesKey = key;
-          _paginating = false;
-        });
-      }
-    });
-  }
-
-  List<String> _splitParagraph(TextBlock block, double width, double height) {
-    final style = block.isHeading ? _headingStyle : _bodyStyle;
-    final result = <String>[];
-    var remaining = block.text;
-    var guard = 0;
-    while (remaining.isNotEmpty && guard++ < 500) {
-      var lo = 1;
-      var hi = remaining.length;
-      var best = 1;
-      while (lo <= hi) {
-        final mid = (lo + hi) ~/ 2;
-        final tp = TextPainter(
-          text: TextSpan(text: remaining.substring(0, mid), style: style),
-          textDirection: TextDirection.ltr,
-          textScaler: MediaQuery.textScalerOf(context),
-        )..layout(maxWidth: width);
-        final fits = tp.height <= height;
-        tp.dispose();
-        if (fits) {
-          best = mid;
-          lo = mid + 1;
-        } else {
-          hi = mid - 1;
-        }
-      }
-      var end = best;
-      if (end < remaining.length) {
-        var wordBoundary = end;
-        while (wordBoundary > 0 && remaining[wordBoundary - 1] != ' ') {
-          wordBoundary--;
-        }
-        if (wordBoundary > 0) end = wordBoundary;
-      }
-      result.add(remaining.substring(0, end).trimRight());
-      remaining = remaining.substring(end).trimLeft();
-    }
-    return result.isEmpty ? [block.text] : result;
+  void _syncPageFromScroll() {
+    final idx = _topVisiblePageInScroll();
+    if (idx == null) return;
+    if (idx != _currentPage) setState(() => _currentPage = idx);
+    _onPageShown(idx);
   }
 
   // --------------------------------------------------------------- progress
 
-  bool _onScroll(ScrollNotification n) {
-    if (n.metrics.maxScrollExtent > 0) {
-      // Never report bytes -- map the viewport to a block so the scroll and
-      // paginated views share one progress scale regardless of the 10% top
-      // padding.
-      _syncBlockFromScroll();
+  /// Reading progress is derived from char position: the fraction of the book
+  /// consumed through this page. Saved as `current_offset` so scroll, paginate,
+  /// and the web reader all resume at the same spot.
+  void _onPageShown(int page) {
+    final layer = _layer;
+    if (layer != null && layer.totalChars > 0) {
+      _updateProgress(layer.fractionThrough(page));
+    } else if (_renderPages.isNotEmpty) {
+      _updateProgress(((page + 1) / _renderPages.length).clamp(0.0, 1.0));
     }
-    return false;
-  }
-
-  /// Convert the current scroll viewport back into [result] the block at the
-  /// top, then both [_currentBlock] and progress stay consistent with the
-  /// paginated view's block-derived progress.
-  void _syncBlockFromScroll() {
-    final idx = _topVisibleBlockInScroll();
-    if (idx == null) return;
-    _currentBlock = idx.toDouble();
-    _updateProgress(_progressFromBlock(idx.toDouble()));
-  }
-
-  double _progressFromBlock(double block) {
-    final total = _structured?.allBlocks.length ?? 0;
-    if (total <= 1) return 1.0;
-    return (block / (total - 1)).clamp(0.0, 1.0);
   }
 
   void _onPageChanged(int index, int total) {
-    if (total <= 1) {
-      _currentBlock = 0.0;
-      _updateProgress(1.0);
-      return;
-    }
-    // The block anchor for this page: the first block of the page we are on
-    // (fractional for a chunk of a split paragraph).
-    final pages = _pages;
-    final pageBlock = (pages != null && pages.isNotEmpty)
-        ? pages[index.clamp(0, pages.length - 1)].first.$2
-        : _currentBlock;
-    if (index + 1 != _currentPage || total != _pageCount) {
+    if (index != _currentPage || total != _pageCount) {
       setState(() {
-        _currentPage = index + 1;
+        _currentPage = index;
         _pageCount = total;
       });
     }
-    if (pageBlock != null) {
-      _currentBlock = pageBlock;
-      _updateProgress(_progressFromBlock(pageBlock));
-    } else {
-      _updateProgress(index / (total - 1));
-    }
+    _onPageShown(index);
   }
 
   void _updateProgress(double p) {
     final clamped = p.clamp(0.0, 1.0);
-    // Always move the bar: the footer (percent + seekbar) listens to this
-    // notifier, and one page can be far less than 0.5% in a long book. Only
-    // the debounced network save below is allowed to be throttled.
     _progressNotifier.value = clamped;
-    // While the scroll view is settling on a freshly restored position, update
-    // the bar but don't persist: the jump's own scroll notification would
-    // otherwise re-save the position we just loaded (clobbering it if the
-    // landing is mid-way). Real user scrolling after the restore saves again.
     if (_restoringScroll) return;
     _saveTimer?.cancel();
     _saveTimer = Timer(const Duration(seconds: 1), () {
-      _booksService.saveProgress(widget.book.id, fraction: _progress);
-      LibraryRefresh.instance.applyProgress(widget.book.id, _progress);
+      unawaited(_saveProgressNow());
     });
+  }
+
+  // -------------------------------------------------------------- paginated
+
+  PageController? _paginateController;
+  int _paginateAnchor = 0;
+  bool _paginateSpread = false;
+
+  /// Returns the paginated view's controller, creating it once and reusing it
+  /// across rebuilds. A fresh controller is only built when the mode changes
+  /// (new [_anchorSeed]) or the spread geometry changes. Recreating it on every
+  /// build made the PageView swap controllers each frame, which could dispose a
+  /// page's widget while its same-index replacement mounted in the same frame.
+  PageController _paginateControllerFor(int initial) {
+    final spread = _spreadActive;
+    final current = _paginateController;
+    if (current != null &&
+        _paginateAnchor == _anchorSeed &&
+        _paginateSpread == spread) {
+      return current;
+    }
+    final next = PageController(initialPage: spread ? initial ~/ 2 : initial);
+    _paginateController = next;
+    _paginateAnchor = _anchorSeed;
+    _paginateSpread = spread;
+    if (current != null) {
+      // The old PageView is unmounted at the end of this frame; dispose after.
+      WidgetsBinding.instance.addPostFrameCallback((_) => current.dispose());
+    }
+    return next;
+  }
+
+  Widget _paginatedView() {
+    final pages = _renderPages;
+    final initial = _currentPage.clamp(0, math.max(0, pages.length - 1)).toInt();
+    final controller = _paginateControllerFor(initial);
+    return _PaginatedView(
+      key: ValueKey('pag-$_anchorSeed'),
+      controller: controller,
+      pages: pages,
+      settings: _settings,
+      inset: _readingInset,
+      paper: _paperFor(_settings.atmosphere),
+      pdf: _pdfRenderer,
+      highlights: _highlightsByPage,
+      initialPage: initial,
+      isTablet: MediaQuery.sizeOf(context).shortestSide >= 600,
+      onPageChanged: _onPageChanged,
+      onWordLongPress: (page, global, s, e, t) =>
+          _onWordLongPress(page, global, s, e, t),
+      onToggleChrome: _toggleChrome,
+    );
   }
 
   // ------------------------------------------------------------- highlight
 
-  void _onLongPress(int index, TextBlock block, LongPressStartDetails details) {
+  void _onWordLongPress(int page, Offset global, int start, int end, String text) {
     HapticFeedback.selectionClick();
     final box = _readingKey.currentContext?.findRenderObject() as RenderBox?;
-    final local = box?.globalToLocal(details.globalPosition) ??
+    final local = box?.globalToLocal(global) ??
         Offset(MediaQuery.sizeOf(context).width / 2, 120);
     setState(() {
       _highlightMenu = _HighlightMenuState(
-        blockIndex: index,
-        anchor: block.text,
+        page: page,
+        start: start,
+        end: end,
+        text: text,
         position: local,
       );
     });
@@ -1175,8 +967,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
   Widget _buildHighlightMenu() {
     final menu = _highlightMenu!;
     final width = MediaQuery.sizeOf(context).width;
-    // clamp() asserts if the lower bound exceeds the upper; on narrow screens
-    // the menu (300px wide) can't fit with a 16px margin, so widen the ceiling.
     final maxLeft = math.max(16.0, width - 300.0);
     final left = (menu.position.dx - 130).clamp(16.0, maxLeft);
     return Positioned(
@@ -1187,7 +977,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
         onColor: (hex) => _applyHighlight(hex),
         onNote: _addNote,
         onCopy: () async {
-          await Clipboard.setData(ClipboardData(text: menu.anchor));
+          await Clipboard.setData(ClipboardData(text: menu.text));
           if (!mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Text copied')),
@@ -1202,14 +992,22 @@ class _ReaderScreenState extends State<ReaderScreen> {
   void _applyHighlight(String hex) {
     final menu = _highlightMenu;
     if (menu == null) return;
+    final color = _parseColor(hex, fallback: _settings.atmosphere.accent);
     setState(() {
-      _highlights[menu.blockIndex] = hex;
+      _highlightsByPage
+          .putIfAbsent(menu.page, () => [])
+          .add(PageHighlight(start: menu.start, end: menu.end, color: color));
       _highlightMenu = null;
     });
     _booksService.api.post('/sync/annotations', body: {
       'book_id': widget.book.id,
       'kind': 'highlight',
-      'anchor': menu.anchor,
+      'anchor': jsonEncode({
+        'page': menu.page,
+        'start_char': menu.start,
+        'end_char': menu.end,
+        'text': menu.text,
+      }),
       'color': hex,
     });
   }
@@ -1250,7 +1048,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     _booksService.api.post('/sync/annotations', body: {
       'book_id': widget.book.id,
       'kind': 'note',
-      'anchor': menu.anchor,
+      'anchor': menu.text,
       'note_text': note.trim(),
     });
   }
@@ -1260,7 +1058,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     if (cleaned.length != 6) return fallback;
     final v = int.tryParse(cleaned, radix: 16);
     if (v == null) return fallback;
-    return Color(0xFF000000 | v).withValues(alpha: 0.45);
+    return Color(0xFF000000 | v);
   }
 
   // ----------------------------------------------------------------- chrome
@@ -1329,6 +1127,24 @@ class _ReaderScreenState extends State<ReaderScreen> {
                       ],
                     ),
                   ),
+                  if (_textLayerAvailable)
+                    IconButton(
+                      onPressed: _toggleTextMode,
+                      icon: Icon(
+                        _settings.textMode
+                            ? Icons.text_fields
+                            : Icons.picture_as_pdf,
+                        color: text,
+                      ),
+                      tooltip: _settings.textMode
+                          ? 'Text mode: on (tap to show original PDF)'
+                          : 'Text mode: off (tap to use your font)',
+                    ),
+                  IconButton(
+                    onPressed: _reExtract,
+                    icon: Icon(Icons.refresh, color: text),
+                    tooltip: 'Re-extract this book',
+                  ),
                   Padding(
                     padding: const EdgeInsets.only(right: 12),
                     child: _SyncIndicator(
@@ -1365,11 +1181,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
               accent: _settings.atmosphere.accent,
               onSeek: (v) {
                 _updateProgress(v);
-                _scrollToProgress(v);
+                _jumpToPage(_pageForFraction(v));
               },
               onGoToPage: _openGoToPage,
               onAppearance: _openAppearance,
               onSearch: _openSearch,
+              onToc: _openToc,
               onToggleBookmark: _toggleBookmark,
               onAnnotations: _openAnnotations,
               annotationCount: _annotations?.length ?? 0,
@@ -1387,55 +1204,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
-  void _scrollToProgress(double fraction) {
-    if (!_reflowAvailable) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_settings.mode == ReaderMode.paginated) {
-        final pages = _pages;
-        if (pages == null || pages.isEmpty) return;
-        // Seek to the page whose block range matches the desired progress so
-        // the thumb and the page agree on the same passage.
-        final blocks = _structured!.allBlocks;
-        final targetBlock = blocks.isEmpty
-            ? 0.0
-            : (fraction * (blocks.length - 1))
-                .clamp(0.0, (blocks.length - 1).toDouble());
-        final page = _pageForBlock(targetBlock, pages);
-        final target = page >= 0 ? page : (fraction * (pages.length - 1)).round().clamp(0, pages.length - 1);
-        _bookController.goToPage(target);
-        _onPageChanged(target, pages.length);
-        return;
-      }
-      if (_scrollController.hasClients) {
-        // Seek by block, not pixel, so progress and the bar stay consistent.
-        final block = _fractionToBlock(fraction);
-        if (block != null) {
-          final offset = _scrollOffsetForBlock(block);
-          if (offset != null) {
-            _scrollController.jumpTo(offset.clamp(0.0, _scrollController.position.maxScrollExtent));
-            _syncBlockFromScroll();
-            return;
-          }
-        }
-        _scrollController.jumpTo(
-            fraction * _scrollController.position.maxScrollExtent);
-        _syncBlockFromScroll();
-      }
-    });
-  }
+  /// Physical page count (both modes).
+  int get _totalUnits => _renderPages.length;
 
-  double? _fractionToBlock(double fraction) {
-    final blocks = _structured?.allBlocks;
-    if (blocks == null || blocks.isEmpty) return null;
-    // Unrounded so a seek inside a split paragraph can resolve to the exact
-    // chunk page instead of snapping to the whole paragraph's first block.
-    return (fraction * (blocks.length - 1))
-        .clamp(0.0, (blocks.length - 1).toDouble());
-  }
-
-  /// Opens the "Appearance" sheet (bottom sheet, max 90% height) matching the
-  /// AnyShelf design. The reader stays visible and dimmed behind it, so the
-  /// settings never hide the book entirely.
   Future<void> _openAppearance() {
     return showModalBottomSheet<void>(
       context: context,
@@ -1448,96 +1219,219 @@ class _ReaderScreenState extends State<ReaderScreen> {
         ),
         child: ReaderAppearanceSheet(
           initial: _settings,
-          reflowAvailable: _reflowAvailable,
+          // PDF mode (pdfrx) renders pages for every book, so both scroll and
+          // paginated are always available — run-less books included.
+          reflowAvailable: true,
           onChanged: _updateSettings,
         ),
       ),
     );
   }
 
-  /// "Go to page" dialog. Works in both modes: in paginated mode it turns to
-  /// that page; in scroll mode it jumps to the block at the equivalent
-  /// position.
-  Future<void> _openGoToPage() async {
-    if (!_reflowAvailable) return;
-    final paginated = _settings.mode == ReaderMode.paginated;
-    final current = (_currentPage > 0
-            ? _currentPage
-            : (_currentBlock?.round() ?? 0) + 1)
-        .clamp(1, math.max(1, _totalUnits));
-    final ctl = TextEditingController(text: '$current');
-    final input = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(paginated ? 'Go to page' : 'Go to position'),
-        content: TextField(
-          controller: ctl,
-          autofocus: true,
-          keyboardType: TextInputType.number,
-          decoration: InputDecoration(
-            hintText:
-                paginated ? 'Page 1 to $_totalUnits' : 'Position 1 to $_totalUnits',
+  void _openGoToPage() {
+    if (!_textLayerAvailable) return;
+    final current = (_currentPage + 1).clamp(1, math.max(1, _totalUnits));
+    _goToPageController.text = '$current';
+    setState(() => _goToPageOpen = true);
+  }
+
+  void _closeGoToPage() {
+    FocusManager.instance.primaryFocus?.unfocus();
+    if (!_goToPageOpen) return;
+    setState(() => _goToPageOpen = false);
+  }
+
+  void _submitGoToPage() {
+    final page = int.tryParse(_goToPageController.text);
+    _closeGoToPage();
+    if (page == null || page < 1 || page > _totalUnits) return;
+    // Land on the page after the current frame settles so the jump never
+    // interleaves with a live element deactivation.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _jumpToPage(page - 1);
+    });
+  }
+
+  Widget _buildGoToPagePanel() {
+    if (!_goToPageOpen) return const SizedBox.shrink();
+    final atmosphere = _settings.atmosphere;
+    return Positioned.fill(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: _closeGoToPage,
+        child: Container(
+          color: Colors.black.withValues(alpha: 0.35),
+          alignment: Alignment.center,
+          // Scrollable so the panel stays readable when the keyboard leaves
+          // little room (landscape): it never overflows the viewport.
+          child: SingleChildScrollView(
+            padding: EdgeInsets.fromLTRB(
+              24,
+              24,
+              24,
+              24 + MediaQuery.viewInsetsOf(context).bottom,
+            ),
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 360),
+                child: Container(
+                  padding: const EdgeInsets.fromLTRB(24, 20, 24, 12),
+                  decoration: BoxDecoration(
+                    color: atmosphere.background,
+                    borderRadius: BorderRadius.circular(16),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.25),
+                        blurRadius: 24,
+                        offset: const Offset(0, 8),
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        'Go to page',
+                    style: SereneType.uiBody.copyWith(
+                      color: atmosphere.text,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: _goToPageController,
+                    autofocus: true,
+                    keyboardType: TextInputType.number,
+                    textInputAction: TextInputAction.go,
+                    onSubmitted: (_) => _submitGoToPage(),
+                    decoration: InputDecoration(
+                      hintText: 'Page 1 to $_totalUnits',
+                      hintStyle: SereneType.labelMd.copyWith(
+                        color: atmosphere.text.withValues(alpha: 0.4),
+                      ),
+                    ),
+                    style: SereneType.uiBody.copyWith(color: atmosphere.text),
+                    cursorColor: atmosphere.accent,
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      TextButton(
+                        onPressed: _closeGoToPage,
+                        child: const Text('Cancel'),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton(
+                        onPressed: _submitGoToPage,
+                        child: const Text('Go'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
           ),
-          onSubmitted: (v) => Navigator.pop(context, v),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
+      ),
+    ),
+  ),
+);
+  }
+
+  Future<void> _openToc() async {
+    final outline = _layer?.outline ?? const <OutlineEntry>[];
+    if (outline.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('No table of contents')));
+      return;
+    }
+    final colors = Theme.of(context).extension<SereneTheme>()!.colors;
+    final chosen = await showModalBottomSheet<OutlineEntry>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => Container(
+        decoration: BoxDecoration(
+          color: _settings.atmosphere.background,
+          borderRadius: SereneShape.sheetTop,
+        ),
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * 0.8,
+        ),
+        child: SafeArea(
+          top: false,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  margin: const EdgeInsets.only(top: 10),
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: colors.onSurfaceVariant.withValues(alpha: 0.3),
+                    borderRadius: SereneShape.fullPill,
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 14, 20, 8),
+                child: Text('Table of Contents',
+                    style: SereneType.title.copyWith(
+                        color: _settings.atmosphere.text)),
+              ),
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.fromLTRB(8, 0, 8, 24),
+                  itemCount: outline.length,
+                  itemBuilder: (context, i) {
+                    final e = outline[i];
+                    final active = _currentPage == e.page;
+                    return ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.only(
+                        left: 16 + (e.level.clamp(1, 4) - 1) * 16.0,
+                        right: 16,
+                      ),
+                      title: Text(
+                        e.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: SereneType.uiBody.copyWith(
+                          color: active
+                              ? _settings.atmosphere.accent
+                              : _settings.atmosphere.text,
+                          fontWeight: e.level <= 1 ? FontWeight.w600 : FontWeight.w400,
+                        ),
+                      ),
+                      trailing: Text(
+                        '${e.page + 1}',
+                        style: SereneType.labelSm.copyWith(
+                          color: _settings.atmosphere.text.withValues(alpha: 0.5),
+                        ),
+                      ),
+                      onTap: () => Navigator.pop(context, e),
+                    );
+                  },
+                ),
+              ),
+            ],
           ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, ctl.text),
-            child: const Text('Go'),
-          ),
-        ],
+        ),
       ),
     );
-    ctl.dispose();
-    final page = int.tryParse(input ?? '');
-    if (page == null || page < 1 || page > _totalUnits) return;
-    final target = page - 1;
-
-    if (paginated) {
-      final pages = _pages;
-      if (pages == null || pages.isEmpty) return;
-      final idx = target.clamp(0, pages.length - 1);
-      _bookController.goToPage(idx);
-      _onPageChanged(idx, pages.length);
-    } else {
-      // Map the requested position to the closest block and scroll to it.
-      final block = _pageToBlock(target);
-      if (block != null) _jumpToBlock(block);
-    }
-  }
-
-  /// Number of pages shown to the end user: the real page count in paginated
-  /// mode, or the block count (used as the page scale) in scroll mode.
-  int get _totalUnits {
-    if (_settings.mode == ReaderMode.paginated) {
-      final pages = _pages;
-      if (pages != null && pages.isNotEmpty) return pages.length;
-      if (_pageCount > 0) return _pageCount;
-    }
-    final blocks = _structured?.allBlocks;
-    return blocks == null || blocks.isEmpty ? 0 : blocks.length;
-  }
-
-  /// Translate a 0-based user page number to a block index proportional to the
-  /// current position across the whole text (fractional so seeks inside a
-  /// split paragraph land on the right chunk).
-  double? _pageToBlock(int page) {
-    final blocks = _structured?.allBlocks;
-    if (blocks == null || blocks.isEmpty) return null;
-    final n = _totalUnits;
-    if (n <= 1) return 0.0;
-    final fraction = page / math.max(1, n - 1);
-    return (fraction * (blocks.length - 1))
-        .clamp(0.0, (blocks.length - 1).toDouble());
+    if (chosen == null || !mounted) return;
+    _jumpToPage(chosen.page);
   }
 
   Future<void> _openSearch() async {
-    if (!_reflowAvailable) return;
-    final blocks = _structured!.allBlocks;
+    if (!_textLayerAvailable) return;
     final ctl = TextEditingController();
     final query = await showDialog<String>(
       context: context,
@@ -1561,9 +1455,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
     if (query == null || query.trim().isEmpty) return;
 
     final q = query.trim().toLowerCase();
-    final matches = <(int, TextBlock)>[];
-    for (var i = 0; i < blocks.length; i++) {
-      if (blocks[i].text.toLowerCase().contains(q)) matches.add((i, blocks[i]));
+    final matches = <(int, String)>[];
+    for (var p = 0; p < _layer!.pages.length; p++) {
+      final text = _layer!.pages[p].text;
+      if (text.toLowerCase().contains(q)) matches.add((p, text));
     }
     if (matches.isEmpty) {
       if (!mounted) return;
@@ -1574,11 +1469,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
     if (!mounted) return;
     FocusManager.instance.primaryFocus?.unfocus();
 
-    final colors = Theme.of(context).extension<SereneTheme>()!.colors;
-    final chosen = await showDialog<(int, TextBlock)>(
+    final chosen = await showDialog<(int, String)>(
       context: context,
-      // A small, fixed-size card: never full-screen, leaves a dismissible
-      // barrier, and fits on phones and tablets alike.
       builder: (context) => Dialog(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxHeight: 300, maxWidth: 440),
@@ -1590,7 +1482,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 padding: const EdgeInsets.fromLTRB(20, 14, 20, 4),
                 child: Text(
                   '${matches.length} result${matches.length == 1 ? '' : 's'}',
-                  style: SereneType.labelMd.copyWith(color: colors.onSurface),
+                  style: SereneType.labelMd
+                      .copyWith(color: _settings.atmosphere.text),
                 ),
               ),
               Flexible(
@@ -1600,15 +1493,27 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   itemCount: math.min(matches.length, 8),
                   itemBuilder: (context, i) {
                     final m = matches[i];
+                    final idx = m.$2.toLowerCase().indexOf(q);
+                    final start = math.max(0, idx - 30);
+                    final end = math.min(m.$2.length, idx + q.length + 50);
+                    final snippet = m.$2.substring(start, end)
+                        .replaceAll('\n', ' ');
                     return ListTile(
                       dense: true,
                       contentPadding:
                           const EdgeInsets.symmetric(horizontal: 20, vertical: 0),
                       title: Text(
-                        m.$2.text,
-                        maxLines: 1,
+                        snippet,
+                        maxLines: 2,
                         overflow: TextOverflow.ellipsis,
-                        style: SereneType.uiBody.copyWith(color: colors.onSurface),
+                        style: SereneType.uiBody
+                            .copyWith(color: _settings.atmosphere.text),
+                      ),
+                      subtitle: Text(
+                        'Page ${m.$1 + 1}',
+                        style: SereneType.labelSm.copyWith(
+                          color: _settings.atmosphere.text.withValues(alpha: 0.6),
+                        ),
                       ),
                       onTap: () => Navigator.pop(context, m),
                     );
@@ -1620,49 +1525,22 @@ class _ReaderScreenState extends State<ReaderScreen> {
         ),
       ),
     );
-    if (chosen == null) return;
-
-    if (_settings.mode == ReaderMode.scroll) {
-      _jumpToBlock(chosen.$1.toDouble());
-    } else {
-      _jumpToPageContaining(chosen.$1);
-    }
-  }
-
-  void _jumpToBlock(double index) {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scrollController.hasClients) return;
-      final offset = _scrollOffsetForBlock(index) ?? 0;
-      _scrollController.animateTo(
-        (offset - 80).clamp(0.0, _scrollController.position.maxScrollExtent),
-        duration: const Duration(milliseconds: 400),
-        curve: Curves.easeOut,
-      );
-    });
-  }
-
-  void _jumpToPageContaining(int index) {
-    final pages = _pages;
-    if (pages == null) return;
-    for (var i = 0; i < pages.length; i++) {
-      // floor() so any chunk page of a split paragraph counts as "containing"
-      // the block (the exact chunk page is close enough for search results).
-      if (pages[i].any((e) => e.$2.floor() == index)) {
-        _bookController.goToPage(i);
-        _onPageChanged(i, pages.length);
-        return;
-      }
-    }
+    if (chosen == null || !mounted) return;
+    _jumpToPage(chosen.$1);
   }
 }
 
 class _HighlightMenuState {
-  final int blockIndex;
-  final String anchor;
+  final int page;
+  final int start;
+  final int end;
+  final String text;
   final Offset position;
   const _HighlightMenuState({
-    required this.blockIndex,
-    required this.anchor,
+    required this.page,
+    required this.start,
+    required this.end,
+    required this.text,
     required this.position,
   });
 }
@@ -1734,9 +1612,193 @@ class _HighlightMenu extends StatelessWidget {
   }
 }
 
+/// The paginated reading surface: one physical PDF page at a time (or a
+/// two-page spread on tablets), turned with swipe; left/right thirds flip
+/// pages, the centre toggles chrome. Spread mode mirrors the web reader's
+/// `page_layout: spread`: the current index is always the left page of a pair,
+/// and flipping moves by two.
+class _PaginatedView extends StatefulWidget {
+  final PageController controller;
+  final List<TextLayerPage> pages;
+  final ReaderSettings settings;
+  final double inset;
+  final Color paper;
+  final PdfRenderer pdf;
+  final Map<int, List<PageHighlight>> highlights;
+  final int initialPage;
+  final bool isTablet;
+  final void Function(int index, int total) onPageChanged;
+  final void Function(int page, Offset global, int start, int end, String text)
+      onWordLongPress;
+  final VoidCallback onToggleChrome;
+
+  const _PaginatedView({
+    super.key,
+    required this.controller,
+    required this.pages,
+    required this.settings,
+    required this.inset,
+    required this.paper,
+    required this.pdf,
+    required this.highlights,
+    required this.initialPage,
+    required this.isTablet,
+    required this.onPageChanged,
+    required this.onWordLongPress,
+    required this.onToggleChrome,
+  });
+
+  @override
+  State<_PaginatedView> createState() => _PaginatedViewState();
+}
+
+class _PaginatedViewState extends State<_PaginatedView> {
+  bool get _spread =>
+      widget.isTablet && widget.settings.layout == PageLayout.spread;
+
+  /// Number of PageView items: one per physical page, or one per paired spread.
+  int get _itemCount =>
+      _spread ? (widget.pages.length + 1) ~/ 2 : widget.pages.length;
+
+  /// PageView index for a physical page.
+  int _itemFor(int page) => _spread ? page ~/ 2 : page;
+
+  /// Physical page reported for a PageView index (the left page of a pair).
+  int _pageForItem(int item) => _spread ? item * 2 : item;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        widget.onPageChanged(_pageForItem(_itemFor(widget.initialPage)), widget.pages.length);
+      }
+    });
+  }
+
+  void _flip(int delta) {
+    final target = _current + delta;
+    if (target < 0 || target >= _itemCount) return;
+    widget.controller.animateToPage(
+      target,
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  int get _current => widget.controller.hasClients
+      ? widget.controller.page?.round() ?? _itemFor(widget.initialPage)
+      : _itemFor(widget.initialPage);
+
+  void _onTapUp(TapUpDetails d) {
+    final w = MediaQuery.sizeOf(context).width;
+    final x = d.globalPosition.dx;
+    if (x < w * 0.3) {
+      _flip(-1);
+    } else if (x > w * 0.7) {
+      _flip(1);
+    } else {
+      widget.onToggleChrome();
+    }
+  }
+
+  Widget _buildPage(TextLayerPage page, double renderWidth, int physicalIdx) {
+    return TextLayerPageView(
+      page: page,
+      renderWidth: renderWidth,
+      settings: widget.settings,
+      paper: widget.paper,
+      pdf: widget.pdf,
+      highlights: widget.highlights[physicalIdx] ?? const [],
+      onWordLongPress: (global, rect, s, e, t) =>
+          widget.onWordLongPress(physicalIdx, global, s, e, t),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PageView.builder(
+      controller: widget.controller,
+      onPageChanged: (i) =>
+          widget.onPageChanged(_pageForItem(i), widget.pages.length),
+      itemCount: _itemCount,
+      itemBuilder: (context, i) {
+        final size = MediaQuery.sizeOf(context);
+        final availW = size.width - 2 * widget.inset;
+        final availH = size.height - 180;
+        final zoom = widget.settings.pageZoom;
+        final fitWidth = widget.settings.fitMode == FitMode.width;
+        // Base fit scale: Fit Width fills the viewport width, Fit Page fits
+        // both axes. Zoom then scales beyond that -- the page may outgrow the
+        // viewport, in which case it is wrapped in a both-axis pan view so the
+        // reader can move around it (Adobe-style), never overflowing.
+        double baseScaleFor(double w, double h) =>
+            fitWidth ? availW / w : math.min(availW / w, availH / h);
+
+        Widget child;
+        bool needsPan;
+        if (_spread) {
+          final pg = widget.pages[_pageForItem(i)];
+          final pg2Idx = _pageForItem(i) + 1;
+          final pg2 = pg2Idx < widget.pages.length ? widget.pages[pg2Idx] : null;
+          const gap = 24.0;
+          final combinedW = pg.width + (pg2 != null ? pg2.width + gap : 0);
+          final maxH = math.max(pg.height, pg2?.height ?? pg.height);
+          final scale = baseScaleFor(combinedW, maxH);
+          final rw = (pg.width * scale * zoom).clamp(80.0, 4000.0).toDouble();
+          final rw2 = pg2 != null
+              ? (pg2.width * scale * zoom).clamp(80.0, 4000.0).toDouble()
+              : 0.0;
+          final rh1 = pg.height * (rw / pg.width);
+          final rh2 = pg2 != null ? pg2.height * (rw2 / pg2.width) : 0.0;
+          needsPan = (rw + gap + rw2) > availW || math.max(rh1, rh2) > availH;
+          child = Row(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              _buildPage(pg, rw, _pageForItem(i)),
+              if (pg2 != null) ...[
+                SizedBox(width: gap),
+                _buildPage(pg2, rw2, pg2Idx),
+              ],
+            ],
+          );
+        } else {
+          final page = widget.pages[i];
+          final scale = baseScaleFor(page.width, page.height);
+          final rw = (page.width * scale * zoom).clamp(80.0, 4000.0).toDouble();
+          final rh = page.height * (rw / page.width);
+          needsPan = rw > availW || rh > availH;
+          child = _buildPage(page, rw, i);
+        }
+        if (!needsPan) {
+          return GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTapUp: _onTapUp,
+            child: Center(child: child),
+          );
+        }
+        // Zoomed past the viewport: pan both axes. The page keeps its full
+        // zoomed size, so the text stays inside the card (no overflow stripes).
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapUp: _onTapUp,
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: SingleChildScrollView(
+              scrollDirection: Axis.vertical,
+              child: child,
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 /// The reader's bottom chrome: a scrubbable progress slider with percent/pages
-/// labels and a row of action buttons (typography, search, bookmark, text to
-/// speech). Matches the AnyShelf immersive-reader design.
+/// labels and a row of action buttons (annotations, TOC, appearance, search,
+/// bookmark, TTS).
 class _ReaderFooter extends StatelessWidget {
   final double progress;
   final int pageCount;
@@ -1748,6 +1810,7 @@ class _ReaderFooter extends StatelessWidget {
   final VoidCallback onGoToPage;
   final VoidCallback onAppearance;
   final VoidCallback onSearch;
+  final VoidCallback onToc;
   final VoidCallback onToggleBookmark;
   final VoidCallback onTts;
   final VoidCallback onAnnotations;
@@ -1764,6 +1827,7 @@ class _ReaderFooter extends StatelessWidget {
     required this.onGoToPage,
     required this.onAppearance,
     required this.onSearch,
+    required this.onToc,
     required this.onToggleBookmark,
     required this.onTts,
     required this.onAnnotations,
@@ -1847,8 +1911,14 @@ class _ReaderFooter extends StatelessWidget {
                   icon: Icons.format_quote,
                   color: text,
                   onTap: onAnnotations,
-                  tooltip: 'Highlights &amp; Notes',
+                  tooltip: 'Highlights & Notes',
                   badge: importCount > 0 ? '$importCount' : null,
+                ),
+                _FooterAction(
+                  icon: Icons.toc,
+                  color: text,
+                  onTap: onToc,
+                  tooltip: 'Table of Contents',
                 ),
                 _FooterAction(
                   icon: Icons.font_download,
@@ -1878,559 +1948,6 @@ class _ReaderFooter extends StatelessWidget {
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-/// Drives the single-page reader from the reader chrome (seekbar jumps, search
-/// navigation).
-class _BookController {
-  _SinglePageViewState? _state;
-
-  void nextPage() => _state?.flipForward();
-  void previousPage() => _state?.flipBackward();
-  void goToPage(int pageIndex) => _state?.jumpToPage(pageIndex);
-}
-
-/// The paginated reading surface: one full-screen paper page at a time, turned
-/// with a book-like 3D page-flip around the left spine. Swipe left/right to
-/// turn; a quick tap still toggles the chrome (handled by the outer pointer
-/// listener).
-class _SinglePageView extends StatefulWidget {
-  final List<List<(TextBlock, double)>> pages;
-  final ReaderSettings settings;
-  final _BookController controller;
-  final int initialPage;
-  final void Function(int pageIndex, int total) onPageChanged;
-  final VoidCallback onToggleChrome;
-  const _SinglePageView({
-    super.key,
-    required this.pages,
-    required this.settings,
-    required this.controller,
-    required this.initialPage,
-    required this.onPageChanged,
-    required this.onToggleChrome,
-  });
-
-  @override
-  State<_SinglePageView> createState() => _SinglePageViewState();
-}
-
-class _SinglePageViewState extends State<_SinglePageView>
-    with TickerProviderStateMixin {
-  late int _currentPage;
-  late final AnimationController _flip = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 700),
-  );
-  bool _forward = true;
-  bool _busy = false;
-  double _dragProgress = 0;
-  double _dragStartX = 0;
-
-  int get _maxPage => math.max(0, widget.pages.length - 1);
-  bool get _canFlipForward => _currentPage < _maxPage;
-  bool get _canFlipBackward => _currentPage > 0;
-
-  @override
-  void initState() {
-    super.initState();
-    _currentPage = widget.initialPage.clamp(0, _maxPage).toInt();
-    widget.controller._state = this;
-    _flip.addStatusListener((s) {
-      if (s == AnimationStatus.completed) _finishFlip();
-    });
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) widget.onPageChanged(_currentPage, widget.pages.length);
-    });
-  }
-
-  @override
-  void dispose() {
-    widget.controller._state = null;
-    _flip.dispose();
-    super.dispose();
-  }
-
-  void _finishFlip() {
-    if (!mounted) return;
-    setState(() {
-      _currentPage = (_currentPage + (_forward ? 1 : -1)).clamp(0, _maxPage);
-      _busy = false;
-      _flip.value = 0;
-    });
-    widget.onPageChanged(_currentPage, widget.pages.length);
-  }
-
-  void flipForward() {
-    if (_busy || !_canFlipForward) return;
-    setState(() {
-      _forward = true;
-      _busy = true;
-    });
-    _flip.forward(from: 0);
-  }
-
-  void flipBackward() {
-    if (_busy || !_canFlipBackward) return;
-    setState(() {
-      _forward = false;
-      _busy = true;
-    });
-    _flip.forward(from: 0);
-  }
-
-  void jumpToPage(int pageIndex) {
-    final target = pageIndex.clamp(0, _maxPage).toInt();
-    if (target == _currentPage) return;
-    setState(() {
-      _currentPage = target;
-      _busy = false;
-      _flip.value = 0;
-    });
-    widget.onPageChanged(target, widget.pages.length);
-  }
-
-  void _onDragStart(DragStartDetails d) {
-    if (_busy) return;
-    _dragStartX = d.globalPosition.dx;
-    _dragProgress = 0;
-  }
-
-  void _onDragUpdate(DragUpdateDetails d) {
-    if (_busy) return;
-    final dx = d.globalPosition.dx - _dragStartX;
-    _forward = dx < 0;
-    final can = _forward ? _canFlipForward : _canFlipBackward;
-    if (!can) {
-      _flip.value = 0;
-      _dragProgress = 0;
-      return;
-    }
-    final w = MediaQuery.sizeOf(context).width;
-    final delta = _forward ? -dx : dx;
-    _dragProgress = (delta / (w * 0.6)).clamp(0.0, 1.0);
-    _flip.value = _dragProgress;
-  }
-
-  void _onDragEnd(DragEndDetails d) {
-    if (_busy) return;
-    final can = _forward ? _canFlipForward : _canFlipBackward;
-    if (!can) {
-      _flip.animateBack(0, duration: const Duration(milliseconds: 250));
-      _dragProgress = 0;
-      return;
-    }
-    if (_dragProgress >= 0.45) {
-      setState(() => _busy = true);
-      _flip.animateTo(
-        1,
-        duration: const Duration(milliseconds: 380),
-        curve: Curves.easeOutCubic,
-      );
-    } else {
-      _flip.animateBack(
-        0,
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeOutCubic,
-      );
-    }
-    _dragProgress = 0;
-  }
-
-  void _onTapUp(TapUpDetails d) {
-    final w = MediaQuery.sizeOf(context).width;
-    final x = d.globalPosition.dx;
-    // Left/right thirds turn pages like a real book; the centre toggles chrome.
-    if (x < w * 0.3) {
-      flipBackward();
-    } else if (x > w * 0.7) {
-      flipForward();
-    } else {
-      widget.onToggleChrome();
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final pages = widget.pages;
-    if (pages.isEmpty) return const SizedBox.shrink();
-    final paper = _paperFor(widget.settings.atmosphere);
-    const leafPadding = EdgeInsets.fromLTRB(36, 88, 36, 160);
-
-    Widget buildPage(int idx, {bool showPageNumber = true}) => _BookLeaf(
-          blocks: pages[idx],
-          settings: widget.settings,
-          paper: paper,
-          pageNumber: idx + 1,
-          showPageNumber: showPageNumber,
-          padding: leafPadding,
-        );
-
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTapUp: _onTapUp,
-      onHorizontalDragStart: _onDragStart,
-      onHorizontalDragUpdate: _onDragUpdate,
-      onHorizontalDragEnd: _onDragEnd,
-      onHorizontalDragCancel: () {
-        if (!_busy) {
-          _flip.animateBack(0, duration: const Duration(milliseconds: 250));
-          _dragProgress = 0;
-        }
-      },
-      child: AnimatedBuilder(
-        animation: _flip,
-        builder: (context, _) {
-          final angle = _flip.value * math.pi;
-          final progress = _flip.value;
-          final showBack = angle > math.pi / 2;
-          final turning = _busy || progress > 0;
-          // 0..1..0 peak at mid-flip: drives the page swell and spine crease.
-          final wave = math.sin(progress * math.pi);
-
-          // Book page turn like the web reader's StPageFlip: the leaf rotates
-          // around the spine while the perspective entry makes it swell toward
-          // the reader at mid-flip (translate moves the leaf along the view Z).
-          final transform = Matrix4.identity()
-            ..setEntry(3, 2, 0.0022)
-            ..translateByDouble(0.0, 0.0, wave * 110.0, 1.0)
-            ..rotateX(_forward ? angle * 0.06 : -angle * 0.06)
-            ..rotateY(_forward ? -angle : angle);
-
-          // Stationary page beneath the turning leaf.
-          int underlay;
-          if (turning && _forward) {
-            underlay = math.min(_currentPage + 1, _maxPage);
-          } else if (turning && !_forward) {
-            underlay = math.max(_currentPage - 1, 0);
-          } else {
-            underlay = _currentPage;
-          }
-
-          // The turning leaf: front face (current page) becomes the back face
-          // (the page being revealed) after the halfway point of the rotation.
-          Widget? leaf;
-          if (turning) {
-            final frontIdx = _forward ? _currentPage : math.max(_currentPage - 1, 0);
-            final backIdx = _forward
-                ? math.min(_currentPage + 1, _maxPage)
-                : _currentPage;
-            final faceIdx = showBack ? backIdx : frontIdx;
-            Widget face = buildPage(faceIdx, showPageNumber: !showBack);
-            if (showBack) {
-              // The far side of the leaf: mirrored and catching less light.
-              face = ColorFiltered(
-                colorFilter: const ColorFilter.matrix(<double>[
-                  0.9, 0, 0, 0, 0,
-                  0, 0.9, 0, 0, 0,
-                  0, 0, 0.9, 0, 0,
-                  0, 0, 0, 1, 0,
-                ]),
-                child: Transform(
-                  alignment: Alignment.center,
-                  transform: Matrix4.diagonal3Values(-1.0, 1.0, 1.0),
-                  child: face,
-                ),
-              );
-            }
-            // The leaf stays flat like a real printed page (StPageFlip pages
-            // don't bend); the only fold is the dark crease right at the spine
-            // where the leaf pivots. Rounded corners match the web reader.
-            leaf = ClipRRect(
-              borderRadius: BorderRadius.circular(6),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  Positioned.fill(child: face),
-                  // crease along the spine where the page bends over
-                  Positioned.fill(
-                    child: IgnorePointer(
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            begin: _forward
-                                ? Alignment.centerLeft
-                                : Alignment.centerRight,
-                            end: Alignment.center,
-                            colors: [
-                              Colors.black.withValues(alpha: 0.34 * wave),
-                              Colors.transparent,
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  // faint sheen sweeping the leaf as it turns
-                  Positioned.fill(
-                    child: IgnorePointer(
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            begin: _forward
-                                ? Alignment.centerRight
-                                : Alignment.centerLeft,
-                            end: _forward
-                                ? Alignment.centerLeft
-                                : Alignment.centerRight,
-                            colors: [
-                              Colors.white.withValues(alpha: 0.10 * wave),
-                              Colors.transparent,
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            );
-          }
-
-          return Stack(
-            fit: StackFit.expand,
-            children: [
-              // stationary page beneath the turning leaf
-              Positioned.fill(
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(6),
-                  child: buildPage(underlay, showPageNumber: !turning),
-                ),
-              ),
-              // folded bottom corner of the current page, like the web reader's
-              // showPageCorners
-              if (!turning)
-                Positioned(
-                  right: 0,
-                  bottom: 0,
-                  child: CustomPaint(
-                    size: const Size(22, 22),
-                    painter: _CornerFoldPainter(paper),
-                  ),
-                ),
-              // left spine thickness: dark binding edge for a real book feel
-              Positioned(
-                left: 0,
-                top: 0,
-                bottom: 0,
-                width: 10,
-                child: IgnorePointer(
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.10),
-                      borderRadius: const BorderRadius.horizontal(
-                        left: Radius.circular(6),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              // right-hand page-stack edge: a few thin leaf edges giving the
-              // open book thickness and depth (hidden while a leaf is turning)
-              if (!turning && _currentPage < _maxPage)
-                for (var k = 1; k <= 3; k++)
-                  Positioned(
-                    right: -1.0 - k * 1.5,
-                    top: 1.0 + k,
-                    bottom: 1.0 - k,
-                    width: 3,
-                    child: IgnorePointer(
-                      child: Container(
-                        color: paper.withValues(alpha: 0.55 - k * 0.12),
-                      ),
-                    ),
-                  ),
-              // turning leaf
-              if (leaf != null)
-                Positioned.fill(
-                  child: ClipRect(
-                    child: Transform(
-                      alignment: _forward
-                          ? Alignment.centerLeft
-                          : Alignment.centerRight,
-                      transform: transform,
-                      child: leaf,
-                    ),
-                  ),
-                ),
-              // curved shadow cast onto the stationary page being covered; the
-              // gradient sits at the fold so it moves as the leaf turns
-              if (turning && progress > 0)
-                Positioned.fill(
-                  child: IgnorePointer(
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: _forward
-                              ? Alignment.centerRight
-                              : Alignment.centerLeft,
-                          end: Alignment.center,
-                          colors: [
-                            Colors.black.withValues(alpha: 0.18 * progress),
-                            Colors.transparent,
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              // subtle spine shadow on the left edge
-              if (!turning)
-                Positioned(
-                  left: 0,
-                  top: 0,
-                  bottom: 0,
-                  width: 8,
-                  child: IgnorePointer(
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          begin: Alignment.centerLeft,
-                          end: Alignment.centerRight,
-                          colors: [
-                            Colors.black.withValues(alpha: 0.06),
-                            Colors.transparent,
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-            ],
-          );
-        },
-      ),
-    );
-  }
-}
-
-/// The small triangle of paper turned up at the outer corner of a page — the
-/// web reader's `showPageCorners` look.
-class _CornerFoldPainter extends CustomPainter {
-  final Color paper;
-  const _CornerFoldPainter(this.paper);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    const fold = 20.0;
-    final w = size.width;
-    final h = size.height;
-    final corner = Offset(w, h);
-    final left = Offset(w - fold, h);
-    final top = Offset(w, h - fold);
-
-    // soft shadow the turned-up corner casts onto the page beneath
-    final shadow = Path()
-      ..moveTo(left.dx + 3, left.dy)
-      ..lineTo(top.dx, top.dy + 3)
-      ..lineTo(corner.dx, corner.dy)
-      ..close();
-    canvas.drawPath(
-      shadow,
-      Paint()..color = Colors.black.withValues(alpha: 0.12),
-    );
-
-    // the turned-up back of the page corner
-    final flap = Path()
-      ..moveTo(corner.dx, corner.dy)
-      ..lineTo(left.dx, left.dy)
-      ..lineTo(top.dx, top.dy)
-      ..close();
-    canvas.drawPath(
-      flap,
-      Paint()..color = paper.withValues(alpha: 0.98),
-    );
-
-    // crease of the fold
-    canvas.drawLine(
-      left,
-      top,
-      Paint()
-        ..color = Colors.black.withValues(alpha: 0.22)
-        ..strokeWidth = 1,
-    );
-  }
-
-  @override
-  bool shouldRepaint(_CornerFoldPainter oldDelegate) =>
-      oldDelegate.paper != paper;
-}
-
-/// A single paper page: padded text column plus a page number at the bottom
-/// right corner, like a real printed page.
-class _BookLeaf extends StatelessWidget {
-  final List<(TextBlock, double)> blocks;
-  final ReaderSettings settings;
-  final Color paper;
-  final int pageNumber;
-  final bool showPageNumber;
-  final EdgeInsets padding;
-  const _BookLeaf({
-    required this.blocks,
-    required this.settings,
-    required this.paper,
-    required this.pageNumber,
-    this.showPageNumber = true,
-    this.padding = const EdgeInsets.fromLTRB(36, 88, 36, 160),
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final text = settings.atmosphere.text;
-    final bodyStyle = GoogleFonts.getFont(
-      settings.fontFamily,
-      textStyle: TextStyle(
-        fontSize: settings.fontSize,
-        height: settings.lineHeight.value,
-        color: text,
-      ),
-    );
-    final headingStyle = bodyStyle.copyWith(
-      fontSize: settings.fontSize * 1.3,
-      fontWeight: FontWeight.w700,
-    );
-    return Container(
-      color: paper,
-      child: Stack(
-        children: [
-          Positioned.fill(
-            child: SingleChildScrollView(
-              physics: const NeverScrollableScrollPhysics(),
-              padding: padding,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  for (final b in blocks)
-                    Padding(
-                      padding: EdgeInsets.only(
-                        bottom: b.$1.isHeading ? 12 : 20,
-                      ),
-                      child: Text(
-                        b.$1.text,
-                        textAlign: settings.textAlign,
-                        style: b.$1.isHeading ? headingStyle : bodyStyle,
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
-          if (showPageNumber)
-            Positioned(
-              right: 24,
-              bottom: 18,
-              child: Text(
-                '$pageNumber',
-                style: SereneType.labelSm.copyWith(
-                  color: text.withValues(alpha: 0.5),
-                  letterSpacing: 0.5,
-                ),
-              ),
-            ),
-        ],
       ),
     );
   }
@@ -2549,10 +2066,6 @@ class _SeekBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final f = fraction.clamp(0.0, 1.0);
-    // Compute the fraction from the real bar width (LayoutBuilder), not the
-    // whole screen -- the footer squeezes the bar between a percent label and
-    // a page-count label, so using screen width makes taps/drags drift and
-    // never reach 100%.
     return LayoutBuilder(
       builder: (context, constraints) {
         final barWidth = constraints.maxWidth;
@@ -2619,20 +2132,17 @@ class _SeekBar extends StatelessWidget {
   }
 }
 
-/// The "Highlights &amp; Notes" sheet shown from the reader footer. Lists every
-/// annotation on the book -- reader-created highlights/notes and native PDF
-/// annotations imported at extraction time (badged "Imported from PDF").
-/// Tapping a highlight jumps to its place in the reflowed text.
+/// The "Highlights & Notes" sheet shown from the reader footer.
 class _AnnotationsSheet extends StatelessWidget {
   final List<Annotation> annotations;
-  final List<TextBlock> blocks;
   final ReadingAtmosphere atmosphere;
+  final bool canTap;
   final ValueChanged<String> onTapHighlight;
 
   const _AnnotationsSheet({
     required this.annotations,
-    required this.blocks,
     required this.atmosphere,
+    required this.canTap,
     required this.onTapHighlight,
   });
 
@@ -2680,15 +2190,15 @@ class _AnnotationsSheet extends StatelessWidget {
               ),
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 14, 20, 8),
-                child: Text('Highlights &amp; Notes',
+                child: Text('Highlights & Notes',
                     style: SereneType.title.copyWith(color: text)),
               ),
               if (annotations.isEmpty)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(20, 10, 20, 28),
                   child: Text(
-                    'No highlights or notes yet. Highlight a passage to add '
-                    'one, or open this book in a PDF reader to import its '
+                    'No highlights or notes yet. Long-press a word to highlight '
+                    'a passage, or open this book in a PDF reader to import its '
                     'annotations.',
                     style: SereneType.uiBody.copyWith(color: muted),
                   ),
@@ -2699,15 +2209,14 @@ class _AnnotationsSheet extends StatelessWidget {
                     shrinkWrap: true,
                     padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
                     itemCount: annotations.length,
-                    separatorBuilder: (_, __) =>
-                        SizedBox(height: 8),
+                    separatorBuilder: (_, __) => const SizedBox(height: 8),
                     itemBuilder: (context, i) => _AnnotationTile(
                       annotation: annotations[i],
                       text: text,
                       muted: muted,
                       hint: hint,
                       accent: atmosphere.accent,
-                      canTap: blocks.isNotEmpty,
+                      canTap: canTap,
                       onTap: annotations[i].kind == 'highlight'
                           ? () {
                               final t = annotations[i].anchoredText;
@@ -2728,9 +2237,7 @@ class _AnnotationsSheet extends StatelessWidget {
   }
 }
 
-/// A single annotation in the Highlights &amp; Notes sheet: colored marker,
-/// the quoted text or the note body, and an "Imported from PDF" badge when the
-/// annotation came from the original document rather than the reader.
+/// A single annotation in the Highlights & Notes sheet.
 class _AnnotationTile extends StatelessWidget {
   final Annotation annotation;
   final Color text;
@@ -2754,10 +2261,7 @@ class _AnnotationTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final kind = annotation.kind;
     final isHighlight = kind == 'highlight';
-    final color = _AnnotationsSheet._parseColor(
-      annotation.color,
-      accent,
-    );
+    final color = _AnnotationsSheet._parseColor(annotation.color, accent);
     final body = isHighlight
         ? (annotation.anchoredText ?? '')
         : (annotation.noteText ?? '');
@@ -2856,4 +2360,3 @@ class _AnnotationTile extends StatelessWidget {
     );
   }
 }
-

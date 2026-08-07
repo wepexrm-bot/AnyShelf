@@ -128,6 +128,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
     return Scaffold(
       floatingActionButton: FloatingActionButton(
+        heroTag: 'add-book-library',
         onPressed: () => UploadFlow.showAddSheet(context, onUploaded: (book) async {
           // Optimistic insert: the book shows up immediately; a background
           // reload reconciles cover / extraction status.

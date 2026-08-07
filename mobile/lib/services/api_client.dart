@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -19,8 +20,19 @@ class ApiException implements Exception {
 ///   flutter run --dart-define=API_BASE=http://192.168.1.20:8000
 /// On the Android emulator the host machine is reachable at 10.0.2.2.
 class ApiClient {
-  static const String defaultBase =
-      String.fromEnvironment('API_BASE', defaultValue: 'http://localhost:8000');
+  static const String _definedBase = String.fromEnvironment('API_BASE');
+
+  /// Base URL for the backend. Override at build time with
+  /// `--dart-define=API_BASE=http://192.168.1.20:8000`. Without an override it
+  /// defaults to the host machine's loopback — but on Android the emulator
+  /// reaches the host via 10.0.2.2, so a plain `flutter run` hits the backend.
+  static String get defaultBase {
+    if (_definedBase.isNotEmpty) return _definedBase;
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      return 'http://10.0.2.2:8000';
+    }
+    return 'http://localhost:8000';
+  }
 
   final String baseUrl;
   ApiClient({String? baseUrl}) : baseUrl = baseUrl ?? defaultBase;

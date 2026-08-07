@@ -107,27 +107,52 @@ class LibraryRefresh extends ChangeNotifier {
     try {
       final booksService = BooksService();
       final shelvesService = ShelvesService();
-      final booksFuture = booksService.list();
-      final shelvesFuture = shelvesService.list();
+      // Fire both fetches together, but give each an error handler up front so
+      // a failure in one can never orphan as an unhandled exception while the
+      // other is still being awaited.
+      Object? booksError;
+      Object? shelvesError;
+      final booksFuture = booksService.list().then<List<Book>?>(
+        (v) => v,
+        onError: (Object e, StackTrace _) {
+          booksError = e;
+          return null;
+        },
+      );
+      final shelvesFuture = shelvesService.list().then<List<Shelf>?>(
+        (v) => v,
+        onError: (Object e, StackTrace _) {
+          shelvesError = e;
+          return null;
+        },
+      );
       final books = await booksFuture;
       Map<String, double> progress;
-      try {
-        progress = await booksService.allProgress();
-      } catch (_) {
-        // Batch endpoint unavailable (older server): fall back to per-book.
+      if (books == null) {
         progress = <String, double>{};
-        for (final b in books) {
-          try {
-            progress[b.id] = await booksService.progress(b.id);
-          } catch (_) {}
+      } else {
+        try {
+          progress = await booksService.allProgress();
+        } catch (_) {
+          // Batch endpoint unavailable (older server): fall back to per-book.
+          progress = <String, double>{};
+          for (final b in books) {
+            try {
+              progress[b.id] = await booksService.progress(b.id);
+            } catch (_) {}
+          }
         }
       }
       final shelves = await shelvesFuture;
-      _books = books;
-      _shelves = shelves;
+      // Apply whatever succeeded; a failing endpoint keeps the previous
+      // snapshot (e.g. the cached shelves) instead of wiping it empty.
+      if (books != null) _books = books;
+      if (shelves != null) _shelves = shelves;
       _progress = progress;
-      _error = null;
-      _writeCache();
+      _error = booksError ?? shelvesError;
+      if (booksError == null && shelvesError == null) {
+        _writeCache();
+      }
     } catch (e) {
       _error = e;
     } finally {
