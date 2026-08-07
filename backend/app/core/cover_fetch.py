@@ -76,33 +76,42 @@ async def _try_open_library(
     client: httpx.AsyncClient, title: str, author: str
 ) -> tuple[bytes, str] | None:
     # Full-text search finds real editions with covers, where the fielded
-    # `title=` query often returns bare, coverless text editions.
-    params = {"q": f"{title} {author}".strip(), "limit": 10}
-    resp = await client.get(OPEN_LIBRARY_SEARCH, params=params)
-    resp.raise_for_status()
-    docs = resp.json().get("docs") or []
-    if not docs:
-        return None
-
-    want = _normalize(title)
-
-    def match_rank(doc: dict) -> int:
-        doc_title = _normalize(doc.get("title") or "")
-        if doc_title == want:
-            return 0
-        if want and want in doc_title:
-            return 1
-        return 2
-
-    # Prefer editions whose title actually matches (avoids wrong-language or
-    # unrelated hits like "Das Schloss" for an English "The Castle").
-    for doc in sorted(docs, key=match_rank):
-        cover_id = doc.get("cover_i")
-        if not cover_id:
+    # `title=` query often returns bare, coverless text editions. Search the
+    # title alone first: appending the author as a phrase zeroes out results
+    # whenever the typed author name doesn't tokenize-match the index (e.g.
+    # "R.K. Rowling" vs "J. K. Rowling"), which is a common upload typo.
+    # Fall back to the combined phrase only if the title search found nothing.
+    for params in (
+        {"q": f'"{title}"', "limit": 10},
+        {"q": f"{title} {author}".strip(), "limit": 10},
+    ):
+        resp = await client.get(OPEN_LIBRARY_SEARCH, params=params)
+        resp.raise_for_status()
+        docs = resp.json().get("docs") or []
+        if not docs:
             continue
-        result = await _fetch_cover_image(client, OPEN_LIBRARY_COVER.format(cover_id=cover_id))
-        if result:
-            return result
+
+        want = _normalize(title)
+
+        def match_rank(doc: dict) -> int:
+            doc_title = _normalize(doc.get("title") or "")
+            if doc_title == want:
+                return 0
+            if want and want in doc_title:
+                return 1
+            return 2
+
+        # Prefer editions whose title actually matches (avoids wrong-language
+        # or unrelated hits like "Das Schloss" for an English "The Castle").
+        for doc in sorted(docs, key=match_rank):
+            cover_id = doc.get("cover_i")
+            if not cover_id:
+                continue
+            result = await _fetch_cover_image(
+                client, OPEN_LIBRARY_COVER.format(cover_id=cover_id)
+            )
+            if result:
+                return result
     return None
 
 
